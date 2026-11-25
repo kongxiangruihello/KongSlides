@@ -1,0 +1,69 @@
+name: Publish KongSlides v0.1.2
+
+on:
+  push:
+    branches: [release-v0.1.2]
+    paths: [.github/workflows/publish-v0.1.2.yml]
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: kongslides-publish-v0.1.2
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      SOURCE_COMMIT: eda97badb10f63a9264bb0d89e25fa29e016311b
+      BUILD_RUN: "45717423486"
+      EXPECTED_SHA256: 0cce89f785cfbd4ff12a8edf2b1c1ba290857d07b336ec3f41e1f29cddee096c
+    steps:
+      - name: Verify the macOS build and prepare assets
+        shell: bash
+        run: |
+          read -r head result <<< "$(gh run view "$BUILD_RUN" --json headSha,conclusion --jq '[.headSha,.conclusion] | @tsv')"
+          [[ "$head" == "$SOURCE_COMMIT" && "$result" == success ]]
+          gh run download "$BUILD_RUN" --name KongSlides-macOS-preview --dir publish
+          cd publish
+          mv KongSlides-macOS-preview.zip KongSlides-0.1.2-macOS-preview.zip
+          printf '%s  %s\n' "$EXPECTED_SHA256" KongSlides-0.1.2-macOS-preview.zip > SHA256SUMS
+          sha256sum --check SHA256SUMS
+          unzip -tq KongSlides-0.1.2-macOS-preview.zip
+      - name: Publish the preview release
+        shell: bash
+        run: |
+          cat > publish/notes.md <<'EOF'
+          KongSlides 0.1.2 改进旧课件迁移和放映前核对。
+
+          - PPTX 导入继承常见标题和正文占位框的位置，保留可识别的字体、字号、对齐、行距和项目符号。
+          - PPTX 导入报告随课件保存，点击可跳到问题页，并选中可编辑对象。
+          - 工具栏新增“放映前检查”，定位可能被截断的文字和超出画布的对象。
+
+          0.1.1 用户可在 KongSlides 菜单中选择“检查更新…”。亦可下载 ZIP，退出旧版后替换应用。
+
+          预览包适用于 **Apple 芯片、macOS 15 或更新版本**，使用临时签名。macOS 构建和 10 项自动化测试已通过。
+          EOF
+          if ! gh release view v0.1.2 --json isDraft >/dev/null 2>&1; then
+            gh release create v0.1.2 --target "$SOURCE_COMMIT" --title 'KongSlides 0.1.2 教学预览版' \
+              --draft --prerelease --notes-file publish/notes.md
+          fi
+
+          for asset in KongSlides-0.1.2-macOS-preview.zip SHA256SUMS; do
+            remote_digest="$(gh api "repos/$GH_REPO/releases" --jq ".[] | select(.tag_name == \"v0.1.2\") | .assets[] | select(.name == \"$asset\") | .digest")"
+            if [[ -z "$remote_digest" ]]; then
+              [[ "$(gh release view v0.1.2 --json isDraft --jq .isDraft)" == true ]]
+              gh release upload v0.1.2 "publish/$asset"
+              remote_digest="$(gh api "repos/$GH_REPO/releases" --jq ".[] | select(.tag_name == \"v0.1.2\") | .assets[] | select(.name == \"$asset\") | .digest")"
+            fi
+            local_digest="sha256:$(sha256sum "publish/$asset" | cut -d ' ' -f 1)"
+            [[ "$remote_digest" == "$local_digest" ]]
+          done
+
+          gh release edit v0.1.2 --draft=false --prerelease --latest=false
+          [[ "$(gh api "repos/$GH_REPO/commits/v0.1.2" --jq .sha)" == "$SOURCE_COMMIT" ]]
+          gh release view v0.1.2 --json url,isDraft,isPrerelease,assets --jq '{url,isDraft,isPrerelease,assets:[.assets[] | .name]}'
