@@ -98,8 +98,8 @@ final class SoftwareUpdate {
                 update = try await prepare(downloaded, offer: offer, source: app, destination: app,
                                            expected: version)
             } catch UpdateProblem.appLocation {
-                guard let destination = chooseDestination(for: offer.version),
-                      destination.path != app.path else { return }
+                guard let destination = chooseDestination(for: offer.version) else { return }
+                guard destination.path != app.path else { throw UpdateProblem.appLocation }
                 let existing = try StagedUpdate.versionAtDestination(destination)
                 if let existing, existing >= offer.version { throw UpdateProblem.destinationOccupied }
                 update = try await prepare(downloaded, offer: offer, source: app,

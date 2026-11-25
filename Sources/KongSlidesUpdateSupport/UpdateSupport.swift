@@ -96,25 +96,24 @@ public enum UpdateInstallation {
     public static let stagePrefix = ".KongSlides-update-"
 
     public static func version(of app: URL) -> AppVersion? {
-        let plist = app.appendingPathComponent("Contents/Info.plist")
-        guard let values = try? app.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey]),
-              values.isDirectory == true, values.isSymbolicLink == false,
-              let data = try? Data(contentsOf: plist),
-              let info = (try? PropertyListSerialization.propertyList(from: data, format: nil)) as? [String: Any],
-              info["CFBundleIdentifier"] as? String == UpdateRepository.bundleID,
-              info["CFBundleExecutable"] as? String == "KongSlides",
-              let version = info["CFBundleShortVersionString"] as? String else { return nil }
-        return AppVersion(version)
+        try? installedVersion(at: app)
     }
 
-    // lstat distinguishes a vacant location from an unrelated file, including a dangling symlink.
+    // lstat reads the current entry without cached URL attributes or following a symbolic link.
     public static func installedVersion(at app: URL) throws -> AppVersion? {
         var entry = stat()
         if lstat(app.path, &entry) != 0 {
             if errno == ENOENT { return nil }
             throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
         }
-        guard let version = version(of: app) else { throw CocoaError(.fileWriteFileExists) }
+        let plist = app.appendingPathComponent("Contents/Info.plist")
+        guard (entry.st_mode & mode_t(S_IFMT)) == mode_t(S_IFDIR),
+              let data = try? Data(contentsOf: plist),
+              let info = (try? PropertyListSerialization.propertyList(from: data, format: nil)) as? [String: Any],
+              info["CFBundleIdentifier"] as? String == UpdateRepository.bundleID,
+              info["CFBundleExecutable"] as? String == "KongSlides",
+              let value = info["CFBundleShortVersionString"] as? String,
+              let version = AppVersion(value) else { throw CocoaError(.fileWriteFileExists) }
         return version
     }
 
