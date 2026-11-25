@@ -156,12 +156,13 @@ enum PowerPoint {
     }
 
     private static func textBox(_ object: SlideObject, id: Int) -> String {
-        """
+        let margin = object.textLayout?.insets ?? .init()
+        return """
         <p:sp><p:nvSpPr><p:cNvPr id="\(id)" name="Text \(id)"/>
         <p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr>
         <p:spPr>\(geometry(object))<a:noFill/><a:ln><a:noFill/></a:ln></p:spPr>
-        <p:txBody><a:bodyPr lIns="0" tIns="0" rIns="0" bIns="0" wrap="square" anchor="t"><a:noAutofit/></a:bodyPr>
-        <a:lstStyle/>\(paragraphs(object.text, fontSize: object.fontSize, bold: object.bold, color: object.color))
+        <p:txBody><a:bodyPr lIns="\(emu(margin.left))" tIns="\(emu(margin.top))" rIns="\(emu(margin.right))" bIns="\(emu(margin.bottom))" wrap="square" anchor="t"><a:noAutofit/></a:bodyPr>
+        <a:lstStyle/>\(paragraphs(object.text, fontSize: object.fontSize, bold: object.bold, color: object.color, layout: object.textLayout))
         </p:txBody></p:sp>
         """
     }
@@ -183,18 +184,61 @@ enum PowerPoint {
     }
 
     private static func paragraphs(_ text: String, fontSize: Double, bold: Bool = false,
-                                   color: String = Palette.ink) -> String {
+                                   color: String = Palette.ink, layout: SlideTextLayout? = nil) -> String {
         let size = Int((fontSize * 100).rounded())
+        let latin = attribute(layout?.fontName ?? "Arial")
+        let eastAsian = attribute(layout?.fontName ?? "+mn-ea")
         return text.replacingOccurrences(of: "\r\n", with: "\n")
-            .replacingOccurrences(of: "\r", with: "\n").components(separatedBy: "\n").map { line in
-                if line.isEmpty { return "<a:p><a:endParaRPr lang=\"zh-CN\" sz=\"\(size)\"/></a:p>" }
-                return """
-                <a:p><a:pPr marL="0" indent="0"/><a:r>
-                <a:rPr lang="zh-CN" sz="\(size)" b="\(bold ? 1 : 0)">
-                \(fill(color))<a:latin typeface="Arial"/><a:ea typeface="+mn-ea"/>
-                </a:rPr><a:t>\(escaped(line))</a:t></a:r></a:p>
-                """
+            .replacingOccurrences(of: "\r", with: "\n").components(separatedBy: "\n").enumerated().map { index, line in
+                let format = layout?.paragraphs.indices.contains(index) == true
+                    ? layout?.paragraphs[index] ?? SlideParagraph() : SlideParagraph()
+                let paragraph = paragraphXML(format)
+                if line.isEmpty {
+                    return "<a:p>\(paragraph)<a:endParaRPr lang=\"zh-CN\" sz=\"\(size)\"/></a:p>"
+                }
+                let runs = line.components(separatedBy: "\u{2028}").map { segment in
+                    """
+                    <a:r><a:rPr lang="zh-CN" sz="\(size)" b="\(bold ? 1 : 0)">
+                    \(fill(color))<a:latin typeface="\(latin)"/><a:ea typeface="\(eastAsian)"/>
+                    </a:rPr><a:t>\(escaped(segment))</a:t></a:r>
+                    """
+                }.joined(separator: "<a:br/>")
+                return "<a:p>\(paragraph)\(runs)</a:p>"
             }.joined()
+    }
+
+    private static func paragraphXML(_ format: SlideParagraph) -> String {
+        if format == SlideParagraph() { return "<a:pPr marL=\"0\" indent=\"0\"/>" }
+        let alignment: String
+        switch format.alignment {
+        case .left: alignment = "l"
+        case .center: alignment = "ctr"
+        case .right: alignment = "r"
+        case .justified: alignment = "just"
+        }
+        var children = ""
+        if let multiple = format.lineMultiple {
+            children += "<a:lnSpc><a:spcPct val=\"\(Int((multiple * 100_000).rounded()))\"/></a:lnSpc>"
+        } else if let height = format.lineHeight {
+            children += "<a:lnSpc><a:spcPts val=\"\(Int((height * 100).rounded()))\"/></a:lnSpc>"
+        }
+        if format.before > 0 { children += "<a:spcBef><a:spcPts val=\"\(Int((format.before * 100).rounded()))\"/></a:spcBef>" }
+        if format.after > 0 { children += "<a:spcAft><a:spcPts val=\"\(Int((format.after * 100).rounded()))\"/></a:spcAft>" }
+        switch format.bullet {
+        case .symbol(let sign):
+            children += "<a:buChar char=\"\(attribute(sign))\"/>"
+        case .numbered(let number, let rule):
+            let supported = ["arabicPeriod", "arabicParenR", "arabicParenBoth"]
+            let kind = supported.contains(rule) ? rule : "arabicPeriod"
+            children += "<a:buAutoNum type=\"\(kind)\" startAt=\"\(min(32_767, max(1, number)))\"/>"
+        case nil:
+            children += "<a:buNone/>"
+        }
+        return "<a:pPr marL=\"\(emu(format.left))\" indent=\"\(emu(format.firstLine))\" algn=\"\(alignment)\">\(children)</a:pPr>"
+    }
+
+    private static func attribute(_ text: String) -> String {
+        escaped(text).replacingOccurrences(of: "\"", with: "&quot;")
     }
 
     private static func escaped(_ text: String) -> String {

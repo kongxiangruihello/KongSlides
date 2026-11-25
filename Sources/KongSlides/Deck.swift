@@ -52,18 +52,10 @@ enum SlideDrawing {
                                           shouldInterpolate: true, intent: .defaultIntent) else { continue }
                 context.draw(image, in: rect)
             case .text:
-                let size = CGFloat(object.fontSize)
-                let font = object.bold ? NSFont.boldSystemFont(ofSize: size) : NSFont.systemFont(ofSize: size)
-                let paragraph = NSMutableParagraphStyle()
-                paragraph.lineBreakMode = .byWordWrapping
-                let styled = NSAttributedString(string: object.text, attributes: [
-                    .font: font, .foregroundColor: Palette.color(object.color), .paragraphStyle: paragraph
-                ])
-                let frame = CTFramesetterCreateFrame(CTFramesetterCreateWithAttributedString(styled as CFAttributedString),
-                                                      CFRange(location: 0, length: 0),
-                                                      CGPath(rect: rect, transform: nil), nil)
+                let frame = SlideText.frame(object, in: rect)
                 context.saveGState()
-                context.clip(to: rect)
+                context.addPath(CTFrameGetPath(frame))
+                context.clip()
                 context.textMatrix = .identity
                 CTFrameDraw(frame, context)
                 context.restoreGState()

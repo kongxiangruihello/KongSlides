@@ -6,14 +6,15 @@ import FoundationXML
 extension PowerPoint {
     struct ImportedDeck {
         let deck: Deck
-        let approximatedSlides: [Int]
     }
 
-    static func read(_ url: URL, prepareImage: (Data) -> Data?) throws -> ImportedDeck {
+    static func read(_ url: URL, fontAvailable: ((String) -> Bool)? = nil,
+                     prepareImage: (Data) -> Data?) throws -> ImportedDeck {
         let archive = PresentationArchive(url: url)
         let root = try archive.xml("ppt/presentation.xml")
         guard let size = root.child("sldSz"),
-              let cx = size.number("cx"), let cy = size.number("cy"), (1...200_000_000).contains(cx), (1...200_000_000).contains(cy),
+              let cx = size.number("cx"), let cy = size.number("cy"),
+              (1...200_000_000).contains(cx), (1...200_000_000).contains(cy),
               let slideIDs = root.child("sldIdLst")?.children(named: "sldId"),
               (1...500).contains(slideIDs.count) else {
             throw CocoaError(.fileReadCorruptFile)
@@ -23,8 +24,8 @@ extension PowerPoint {
         let heightInset = (540 - cy * factor) / 2
         let rootLinks = try archive.links(from: "ppt/presentation.xml")
         var draft = Deck(slides: [])
-        var approximation: [Int] = []
         var imageIDs: [String: UUID] = [:]
+        let source = url.lastPathComponent
 
         for (index, slideID) in slideIDs.enumerated() {
             guard let relation = slideID.attribute(forLocalName: "id", uri: OfficeNamespace.relationships)?.stringValue,
@@ -34,24 +35,58 @@ extension PowerPoint {
                 throw CocoaError(.fileReadCorruptFile)
             }
             let links = try archive.links(from: path, optional: true)
-            var slide = Slide(background: content.child("bg")?.child("bgPr")?.rgbFill ?? "FFFFFF")
-            var didApproximate = abs(cx / cy - 16.0 / 9.0) > 0.002 ||
-                content.child("bg") != nil && content.child("bg")?.child("bgPr")?.rgbFill == nil
+            var context = PowerPointLayout(defaults: root.child("defaultTextStyle"))
+            if let path = links.values.first(where: { $0.type == "slideLayout" })?.path {
+                context = try archive.layout(at: path, defaults: context.defaults)
+            }
+            let background = content.child("bg") ?? context.layout?.child("cSld")?.child("bg") ??
+                context.master?.child("cSld")?.child("bg")
+            let backgroundColor = background?.child("bgPr").flatMap { context.color($0) }
+            var slide = Slide(background: backgroundColor ?? "FFFFFF")
+            var diagnostics: [ImportDiagnostic] = []
+            func note(_ kind: ImportDiagnostic.Kind, _ detail: String, object: UUID? = nil) {
+                let diagnostic = ImportDiagnostic(kind: kind, detail: detail, objectID: object)
+                if !diagnostics.contains(diagnostic) { diagnostics.append(diagnostic) }
+            }
+            if abs(cx / cy - 16.0 / 9.0) > 0.002 { note(.canvas, "源页面按比例放入 16∶9 画布。") }
+            if background != nil && backgroundColor == nil {
+                note(.background, "本页使用了渐变、图片或主题背景，已改用白色。")
+            }
+            let showMaster = xml.value("showMasterSp") != "0" && context.layout?.value("showMasterSp") != "0"
+            let inheritedParts = [context.layout, showMaster ? context.master : nil].compactMap { $0 }
+            if inheritedParts.contains(where: { part in
+                (part.child("cSld")?.child("spTree")?.elementChildren ?? []).contains {
+                    ["sp", "pic", "grpSp", "graphicFrame", "cxnSp"].contains($0.localName ?? "") && $0.placeholder == nil
+                }
+            }) { note(.unsupported, "版式或母版上的独立装饰对象未转换。") }
+
             if let notes = links.values.first(where: { $0.type == "notesSlide" }) {
                 let notesXML = try archive.xml(notes.path)
                 let noteShapes = notesXML.child("cSld")?.child("spTree")?.children(named: "sp") ?? []
                 slide.speakerNotes = noteShapes.first(where: { $0.placeholderType == "body" })?
                     .child("txBody")?.plainText ?? ""
             }
+
             for element in objects.elementChildren {
-                let name = element.localName
+                let name = element.localName ?? ""
                 if name == "nvGrpSpPr" || name == "grpSpPr" { continue }
-                guard name == "sp" || name == "pic" else { didApproximate = true; continue }
+                let sourceName = element.elementChildren.first { $0.localName?.hasPrefix("nv") == true }?
+                    .child("cNvPr")?.value("name")
+                let label = String((sourceName?.isEmpty == false ? sourceName ?? name : name).prefix(60))
+                guard name == "sp" || name == "pic" else {
+                    let type = ["grpSp": "组合对象", "graphicFrame": "表格、图表或 SmartArt", "cxnSp": "连接线"][name] ?? "对象"
+                    note(.unsupported, "\(type)「\(label)」未转换。")
+                    continue
+                }
+
+                let ancestry = context.inheritance(for: element)
                 let properties = element.child("spPr")
-                let transform = properties?.child("xfrm")
+                let transform = ancestry.lazy.compactMap { $0.child("spPr")?.child("xfrm") }
+                    .first { $0.child("off") != nil && $0.child("ext") != nil }
                 let origin = transform?.child("off")
                 let extent = transform?.child("ext")
                 var object = SlideObject()
+                let hasGeometry: Bool
                 if let x = origin?.number("x"), let y = origin?.number("y"),
                    let width = extent?.number("cx"), let height = extent?.number("cy"),
                    abs(x * factor) <= 9_000, abs(y * factor) <= 9_000,
@@ -60,79 +95,97 @@ extension PowerPoint {
                     object.y = y * factor + heightInset
                     object.width = max(1, width * factor)
                     object.height = max(1, height * factor)
+                    hasGeometry = true
                 } else {
-                    didApproximate = true
                     object.y = slide.objects.isEmpty ? 72 : min(390, 72 + Double(slide.objects.count) * 112)
                     object.height = slide.objects.isEmpty ? 100 : 140
+                    hasGeometry = false
                 }
-                if transform?.unqualifiedAttribute("rot") != nil ||
-                   transform?.unqualifiedAttribute("flipH") != nil ||
-                   transform?.unqualifiedAttribute("flipV") != nil { didApproximate = true }
+                if (transform?.number("rot") ?? 0) != 0 || transform?.value("flipH") == "1" ||
+                    transform?.value("flipV") == "1" {
+                    note(.geometry, "「\(label)」的旋转或翻转未保留。", object: object.id)
+                }
 
                 if name == "pic" {
                     guard let ref = element.child("blipFill")?.child("blip")?
                         .attribute(forLocalName: "embed", uri: OfficeNamespace.relationships)?.stringValue,
-                          let imagePath = links[ref]?.path else { didApproximate = true; continue }
+                          let imagePath = links[ref]?.path else {
+                        note(.image, "「\(label)」没有可读取的嵌入图片。")
+                        continue
+                    }
                     if imageIDs[imagePath] == nil {
                         guard let bytes = try archive.part(imagePath, maximum: 48 * 1024 * 1024, optional: true),
-                              let png = prepareImage(bytes) else { didApproximate = true; continue }
+                              let png = prepareImage(bytes) else {
+                            note(.image, "「\(label)」的图片无法解码。")
+                            continue
+                        }
                         let id = UUID()
                         imageIDs[imagePath] = id
                         draft.images[id] = png
                     }
                     object.kind = .image
                     object.imageID = imageIDs[imagePath]
-                    if element.child("blipFill")?.child("srcRect") != nil { didApproximate = true }
+                    if !hasGeometry { note(.geometry, "「\(label)」使用了默认位置。", object: object.id) }
+                    if let crop = element.child("blipFill")?.child("srcRect"),
+                       ["l", "t", "r", "b"].contains(where: { (crop.number($0) ?? 0) != 0 }) {
+                        note(.crop, "「\(label)」已显示原图，源文件的裁剪范围未保留。", object: object.id)
+                    }
                     slide.objects.append(object)
                     continue
                 }
 
                 let textBody = element.child("txBody")
-                let text = textBody?.plainText ?? ""
-                let fill = properties?.rgbFill
-                let preset = properties?.child("prstGeom")?.unqualifiedAttribute("prst")?.stringValue
-                if let preset, preset != "rect" { didApproximate = true }
-                if properties?.child("ln")?.child("solidFill") != nil ||
-                   properties?.child("gradFill") != nil || properties?.child("custGeom") != nil ||
-                   element.child("style") != nil { didApproximate = true }
-
+                let text = textBody?.text(softBreak: "\u{2028}") ?? ""
+                let fill = properties.flatMap { context.color($0) }
+                let preset = properties?.child("prstGeom")?.value("prst")
+                guard !text.isEmpty || fill != nil else {
+                    if element.placeholder == nil { note(.unsupported, "「\(label)」的形状或效果未转换。") }
+                    continue
+                }
+                if !hasGeometry {
+                    note(element.placeholder != nil ? .placeholder : .geometry,
+                         "「\(label)」使用了默认位置。", object: object.id)
+                }
+                if (preset != nil && preset != "rect") || properties?.child("ln")?.child("solidFill") != nil ||
+                    properties?.child("gradFill") != nil || properties?.child("custGeom") != nil ||
+                    (fill == nil && (element.child("style")?.child("fillRef")?.number("idx") ?? 0) > 0) {
+                    note(.geometry, "「\(label)」的形状、边框或填充已简化。", object: object.id)
+                }
                 if let fill {
                     var background = object
-                    background.id = UUID()
+                    if !text.isEmpty { background.id = UUID() }
                     background.kind = .rectangle
                     background.color = fill
                     slide.objects.append(background)
                 }
-                if !text.isEmpty {
+                if let textBody, !text.isEmpty {
+                    let imported = ImportedText(body: textBody, shape: element, ancestry: ancestry,
+                                                context: context, unit: factor, frame: object.frame)
                     object.text = text
-                    let runs = textBody?.children(named: "p").flatMap { $0.children(named: "r") } ?? []
-                    let firstStyle = runs.first?.child("rPr")
-                    if let size = firstStyle?.number("sz") {
-                        object.fontSize = min(200, max(8, size / 100 * (factor / (1.0 / 12_700))))
-                    } else {
-                        object.fontSize = slide.objects.isEmpty ? 46 : 30
-                        didApproximate = true
+                    let type = ancestry.dropFirst().first?.placeholderType ?? element.placeholderType
+                    object.fontSize = imported.size ?? (["title", "ctrTitle"].contains(type ?? "") ? 46 : 30)
+                    object.bold = imported.bold
+                    object.color = imported.color
+                    object.textLayout = imported.layout
+                    if let font = imported.layout.fontName, fontAvailable?(font) == false {
+                        note(.font, "「\(label)」使用了本机缺少的字体「\(font)」，显示时使用系统替代字体。", object: object.id)
                     }
-                    object.bold = ["1", "true"].contains(firstStyle?.unqualifiedAttribute("b")?.stringValue ?? "")
-                    object.color = firstStyle?.rgbFill ?? Palette.ink
-                    if let firstStyle, runs.contains(where: { $0.child("rPr")?.xmlString != firstStyle.xmlString }) {
-                        didApproximate = true
+                    if imported.mixed {
+                        note(.text, "「\(label)」的局部字体、字号、颜色或文字效果已统一或简化。", object: object.id)
                     }
-                    if element.placeholderType != nil || (textBody?.children(named: "p").contains {
-                        let paragraph = $0.child("pPr")
-                        return paragraph?.child("buChar") != nil || paragraph?.child("buAutoNum") != nil ||
-                            ["ctr", "r", "just", "dist"].contains(paragraph?.unqualifiedAttribute("algn")?.stringValue ?? "")
-                    } ?? false) { didApproximate = true }
+                    if imported.approximateParagraph {
+                        note(.paragraph, "「\(label)」的特殊段落格式、自动缩放或编号已简化。", object: object.id)
+                    }
                     slide.objects.append(object)
-                } else if fill == nil {
-                    didApproximate = true
                 }
             }
-            if xml.child("timing") != nil || xml.child("transition") != nil { didApproximate = true }
-            if didApproximate { approximation.append(index + 1) }
+            if xml.child("timing") != nil || xml.child("transition") != nil {
+                note(.timing, "保留静态页面内容。")
+            }
+            slide.importReport = SlideImportReport(sourceName: source, sourcePage: index + 1, diagnostics: diagnostics)
             draft.slides.append(slide)
         }
-        return ImportedDeck(deck: try draft.validated(), approximatedSlides: approximation)
+        return ImportedDeck(deck: try draft.validated())
     }
 }
 
@@ -142,9 +195,32 @@ private enum OfficeNamespace {
 
 private final class PresentationArchive {
     let url: URL
+    private var layouts: [String: PowerPointLayout] = [:]
+    private var inheritedParts: [String: XMLElement] = [:]
     private var remaining = 192 * 1024 * 1024
 
     init(url: URL) { self.url = url }
+
+    func layout(at path: String, defaults: XMLElement?) throws -> PowerPointLayout {
+        if let existing = layouts[path] { return existing }
+        var result = PowerPointLayout(defaults: defaults)
+        result.layout = try inheritedPart(path)
+        if let path = try links(from: path, optional: true).values.first(where: { $0.type == "slideMaster" })?.path {
+            result.master = try inheritedPart(path)
+            if let theme = try links(from: path, optional: true).values.first(where: { $0.type == "theme" })?.path {
+                result.theme = try inheritedPart(theme)
+            }
+        }
+        layouts[path] = result
+        return result
+    }
+
+    private func inheritedPart(_ path: String) throws -> XMLElement {
+        if let existing = inheritedParts[path] { return existing }
+        let part = try xml(path)
+        inheritedParts[path] = part
+        return part
+    }
 
     func xml(_ path: String) throws -> XMLElement {
         guard let data = try part(path, maximum: 4 * 1024 * 1024),
@@ -228,7 +304,7 @@ private final class PresentationArchive {
     }
 }
 
-private extension XMLElement {
+extension XMLElement {
     var elementChildren: [XMLElement] { (children ?? []).compactMap { $0 as? XMLElement } }
 
     func children(named name: String) -> [XMLElement] { elementChildren.filter { $0.localName == name } }
@@ -251,15 +327,17 @@ private extension XMLElement {
     }
 
     var placeholderType: String? {
-        child("nvSpPr")?.child("nvPr")?.child("ph").map {
+        placeholder.map {
             $0.unqualifiedAttribute("type")?.stringValue ?? "obj"
         }
     }
 
-    var plainText: String {
+    var plainText: String { text(softBreak: "\n") }
+
+    func text(softBreak: String) -> String {
         children(named: "p").map { paragraph in
             paragraph.elementChildren.map { item in
-                if item.localName == "br" { return "\n" }
+                if item.localName == "br" { return softBreak }
                 return item.child("t")?.stringValue ?? ""
             }.joined()
         }.joined(separator: "\n")

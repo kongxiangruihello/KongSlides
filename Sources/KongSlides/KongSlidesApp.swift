@@ -51,7 +51,10 @@ struct EditorView: View {
     @State private var objectID: UUID?
     @State private var editingID: UUID?
     @State private var linkedError: String?
-    @State private var importNotice: String?
+    @State private var reviewMode: SlideReviewMode?
+    @State private var preflightRows: [SlideReviewRow] = []
+    @State private var preflightPageCount = 0
+    @State private var checkingPreflight = false
     @State private var importing = false
     @State private var showNotes = true
     @State private var search = ""
@@ -76,13 +79,20 @@ struct EditorView: View {
                         Divider()
                         notes
                     }
+                    if let reviewMode {
+                        Divider()
+                        reviewPanel(reviewMode)
+                    }
                 }
                 Divider()
                 inspector.frame(width: 230)
             }
         }
         .background(Color(nsColor: .windowBackgroundColor))
-        .onChange(of: slide.id) { objectID = nil; editingID = nil }
+        .onChange(of: slide.id) {
+            if selection == nil { objectID = nil }
+            editingID = nil
+        }
         .onChange(of: objectID) { if editingID != objectID { editingID = nil } }
         .onChange(of: canvasTextFocused) { if !canvasTextFocused { editingID = nil } }
         .alert("操作未完成", isPresented: Binding(
@@ -90,11 +100,7 @@ struct EditorView: View {
         )) {
             Button("好", role: .cancel) { linkedError = nil }
         } message: { Text(linkedError ?? "") }
-        .alert("PPTX 已导入", isPresented: Binding(
-            get: { importNotice != nil }, set: { if !$0 { importNotice = nil } }
-        )) {
-            Button("好", role: .cancel) { importNotice = nil }
-        } message: { Text(importNotice ?? "") }
+
     }
 
     private var controls: some View {
@@ -122,11 +128,15 @@ struct EditorView: View {
             } label: { Label("讲稿", systemImage: showNotes ? "note.text.badge.minus" : "note.text") }
             Menu {
                 Button("导入 PPTX 到当前课件…", action: importPowerPoint).disabled(importing)
+                Button("查看 PPTX 导入报告") { reviewMode = .imported }
+                    .disabled(!deck.slides.contains { $0.importReport != nil })
                 Divider()
                 Button("导出可编辑 PPTX…") { export(.powerPoint) }
                 Button("导出投影 PDF…") { export(.pdf) }
             } label: { Label(importing ? "正在导入" : "交换文件", systemImage: "arrow.left.arrow.right") }
             .fixedSize()
+            Button(action: runPreflight) { Label("放映前检查", systemImage: "checklist") }
+                .disabled(checkingPreflight)
             Button {
                 presenter.start(deck: deck, at: index)
             } label: { Label("放映", systemImage: "play.fill") }
@@ -149,7 +159,7 @@ struct EditorView: View {
                 .textFieldStyle(.roundedBorder)
                 .padding(.horizontal, 12)
             List(selection: Binding<UUID?>(
-                get: { slide.id }, set: { if let id = $0 { slideID = id } }
+                get: { slide.id }, set: { if let id = $0, id != slide.id { objectID = nil; slideID = id } }
             )) {
                 ForEach(filteredSlides) { row in
                     slideRow(row).tag(row.id)
@@ -497,7 +507,7 @@ struct EditorView: View {
             defer { importing = false }
             do {
                 let imported = try await Task.detached(priority: .userInitiated) {
-                    try PowerPoint.read(url) { data in
+                    try PowerPoint.read(url, fontAvailable: { NSFont(name: $0, size: 12) != nil }) { data in
                         guard let source = CGImageSourceCreateWithData(data as CFData, nil),
                               let image = PhotoStorage.thumbnail(source) else { return nil }
                         return PhotoStorage.png(image)
@@ -515,18 +525,42 @@ struct EditorView: View {
                 search = ""
                 slideID = imported.deck.slides.first?.id
 
-                let total = imported.deck.slides.count
-                let pages = imported.approximatedSlides
-                if pages.isEmpty {
-                    importNotice = "已将 \(total) 页追加到当前课件。请核对中文字体和断行。"
-                } else {
-                    let list = pages.prefix(24).map(String.init).joined(separator: "、")
-                    let suffix = pages.count > 24 ? "等 \(pages.count) 页" : "页"
-                    importNotice = "已将 \(total) 页追加到当前课件。源文件第 \(list) \(suffix)含有近似转换或跳过的内容，请核对原片。"
-                }
+                reviewMode = .imported
             } catch {
                 linkedError = "无法导入这份 PPTX。\n\(error.localizedDescription)"
             }
+        }
+    }
+
+    private func reviewPanel(_ mode: SlideReviewMode) -> some View {
+        SlideReviewPanel(
+            mode: mode,
+            rows: mode == .imported ? SlideReviewRow.imported(deck) : preflightRows,
+            pageCount: mode == .imported ? deck.slides.filter { $0.importReport != nil }.count : preflightPageCount,
+            checking: mode == .preflight && checkingPreflight,
+            refresh: runPreflight,
+            close: { reviewMode = nil },
+            reveal: { row in
+                guard let target = deck.slides.first(where: { $0.id == row.slideID }) else { return }
+                search = ""
+                editingID = nil
+                slideID = target.id
+                objectID = target.objects.first { $0.id == row.objectID }?.id
+            }
+        )
+    }
+
+    private func runPreflight() {
+        reviewMode = .preflight
+        guard !checkingPreflight else { return }
+        let snapshot = deck
+        checkingPreflight = true
+        preflightRows = []
+        Task { @MainActor in
+            let result = await Task.detached(priority: .userInitiated) { SlideReviewRow.preflight(snapshot) }.value
+            preflightRows = result
+            preflightPageCount = snapshot.slides.count
+            checkingPreflight = false
         }
     }
 

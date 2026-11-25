@@ -6,6 +6,88 @@ enum Palette {
     static let indigo = "5045A8"
 }
 
+struct SlideTextLayout: Codable, Equatable {
+    struct Insets: Codable, Equatable {
+        var left = 0.0
+        var top = 0.0
+        var right = 0.0
+        var bottom = 0.0
+    }
+
+    var fontName: String?
+    var insets = Insets()
+    var paragraphs: [SlideParagraph] = []
+
+    var isValid: Bool {
+        let edges = [insets.left, insets.top, insets.right, insets.bottom]
+        return edges.allSatisfy { (0...5000).contains($0) } && paragraphs.allSatisfy {
+            (0...1000).contains($0.before) && (0...1000).contains($0.after) &&
+                (0...10_000).contains($0.left) && (-10_000...10_000).contains($0.firstLine) &&
+                ($0.lineMultiple.map { (0.1...10).contains($0) } ?? true) &&
+                ($0.lineHeight.map { (1...1000).contains($0) } ?? true)
+        }
+    }
+}
+
+struct SlideParagraph: Codable, Equatable {
+    enum Alignment: String, Codable, CaseIterable { case left, center, right, justified }
+
+    enum Bullet: Codable, Equatable {
+        case symbol(String)
+        case numbered(Int, String)
+
+        var marker: String {
+            switch self {
+            case .symbol(let sign): return sign
+            case .numbered(let number, "arabicParenR"): return "\(number))"
+            case .numbered(let number, "arabicParenBoth"): return "(\(number))"
+            case .numbered(let number, _): return "\(number)."
+            }
+        }
+    }
+
+    var alignment: Alignment = .left
+    var lineMultiple: Double?
+    var lineHeight: Double?
+    var before = 0.0
+    var after = 0.0
+    var left = 0.0
+    var firstLine = 0.0
+    var bullet: Bullet?
+}
+
+struct ImportDiagnostic: Codable, Equatable {
+    enum Kind: String, Codable {
+        case canvas, background, placeholder, font, text, paragraph, geometry, image, crop, unsupported, timing
+
+        var title: String {
+            switch self {
+            case .canvas: "页面比例调整"
+            case .background: "背景近似"
+            case .placeholder: "占位框位置近似"
+            case .font: "字体替换"
+            case .text: "混合文字样式简化"
+            case .paragraph: "段落格式近似"
+            case .geometry: "对象样式近似"
+            case .image: "图片未导入"
+            case .crop: "图片裁剪近似"
+            case .unsupported: "对象未转换"
+            case .timing: "动画或转场未转换"
+            }
+        }
+    }
+
+    let kind: Kind
+    let detail: String
+    let objectID: UUID?
+}
+
+struct SlideImportReport: Codable, Equatable {
+    let sourceName: String
+    let sourcePage: Int
+    let diagnostics: [ImportDiagnostic]
+}
+
 struct SlideObject: Codable, Identifiable, Equatable {
     enum Kind: String, Codable { case text, image, rectangle }
 
@@ -20,6 +102,7 @@ struct SlideObject: Codable, Identifiable, Equatable {
     var bold = false
     var color = Palette.ink
     var imageID: UUID?
+    var textLayout: SlideTextLayout?
 
     var frame: CGRect { CGRect(x: x, y: y, width: width, height: height) }
 
@@ -38,6 +121,7 @@ struct Slide: Codable, Identifiable, Equatable {
     var background = Palette.paper
     var speakerNotes = ""
     var objects: [SlideObject] = []
+    var importReport: SlideImportReport?
 
     var title: String {
         let title = objects.lazy.filter { $0.kind == .text }.map(\.label).first
@@ -80,7 +164,7 @@ struct Deck: Codable, Equatable {
             for object in slide.objects {
                 guard abs(object.x) <= 10_000, abs(object.y) <= 10_000,
                       (1...10_000).contains(object.width), (1...10_000).contains(object.height),
-                      (8...200).contains(object.fontSize) else {
+                      (8...200).contains(object.fontSize), object.textLayout?.isValid != false else {
                     throw CocoaError(.fileReadCorruptFile)
                 }
                 if object.kind == .image {
