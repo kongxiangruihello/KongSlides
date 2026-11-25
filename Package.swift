@@ -6,7 +6,9 @@ let package = Package(
     defaultLocalization: "zh-Hans",
     platforms: [.macOS("15.0")],
     targets: [
-        .executableTarget(name: "KongSlides"),
-        .testTarget(name: "KongSlidesTests", dependencies: ["KongSlides"])
+        .target(name: "KongSlidesUpdateSupport"),
+        .executableTarget(name: "KongSlides", dependencies: ["KongSlidesUpdateSupport"]),
+        .executableTarget(name: "KongSlidesUpdater", dependencies: ["KongSlidesUpdateSupport"]),
+        .testTarget(name: "KongSlidesTests", dependencies: ["KongSlides", "KongSlidesUpdateSupport"])
     ]
 )

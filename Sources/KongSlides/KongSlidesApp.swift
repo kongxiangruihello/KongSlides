@@ -5,11 +5,22 @@ import UniformTypeIdentifiers
 
 @main
 struct KongSlidesApp: App {
+    @NSApplicationDelegateAdaptor(AppLifecycle.self) private var lifecycle
+    @AppStorage(SoftwareUpdate.automaticKey) private var automaticallyCheck = true
+
     var body: some Scene {
         DocumentGroup(newDocument: SlidesDocument()) { file in
             EditorView(document: file.$document)
                 .frame(minWidth: 1040, minHeight: 660)
                 .tint(Color(nsColor: Palette.color(Palette.indigo)))
+        }
+        .commands {
+            CommandGroup(after: .appInfo) {
+                Button("检查更新…") {
+                    Task { await SoftwareUpdate.shared.check(manual: true) }
+                }
+                Toggle("自动检查更新", isOn: $automaticallyCheck)
+            }
         }
     }
 }
