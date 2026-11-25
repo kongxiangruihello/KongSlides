@@ -91,6 +91,18 @@ final class DeckTests: XCTestCase {
         XCTAssertEqual(try JSONDecoder().decode(Deck.self, from: JSONEncoder().encode(imported)).validated(), imported)
     }
 
+    func testEditingImportedParagraphKeepsFollowingFormatting() {
+        let title = SlideParagraph(alignment: .center)
+        let bullet = SlideParagraph(left: 32, firstLine: -18, bullet: .symbol("◆"))
+        let discussion = SlideParagraph(alignment: .right)
+        var text = SlideObject(text: "经文\n史料引文\n课堂讨论",
+                               textLayout: SlideTextLayout(paragraphs: [title, bullet, discussion]))
+        text.replaceText(with: "经文\n史料\n引文\n课堂讨论")
+        XCTAssertEqual(text.textLayout?.paragraphs, [title, bullet, bullet, discussion])
+        text.replaceText(with: "经文\n史料\n课堂讨论")
+        XCTAssertEqual(text.textLayout?.paragraphs, [title, bullet, discussion])
+    }
+
     func testPlaceholderGeometryAndDefaultsComeFromLayout() throws {
         let path = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: path, withIntermediateDirectories: false)

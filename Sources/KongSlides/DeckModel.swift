@@ -106,6 +106,31 @@ struct SlideObject: Codable, Identifiable, Equatable {
 
     var frame: CGRect { CGRect(x: x, y: y, width: width, height: height) }
 
+    mutating func replaceText(with value: String) {
+        defer { text = value }
+        guard var layout = textLayout, !layout.paragraphs.isEmpty else { return }
+        let old = text.components(separatedBy: "\n")
+        let new = value.components(separatedBy: "\n")
+        guard old.count != new.count else { return }
+
+        let prefix = zip(old, new).prefix(while: { pair in pair.0 == pair.1 }).count
+        let suffixLimit = min(old.count, new.count) - prefix
+        let suffix = zip(old.reversed(), new.reversed()).prefix(suffixLimit).prefix(while: { pair in pair.0 == pair.1 }).count
+        func style(at index: Int) -> SlideParagraph {
+            layout.paragraphs.indices.contains(index) ? layout.paragraphs[index] : .init()
+        }
+
+        let middle = style(at: min(prefix, old.count - 1))
+        let formats = new.indices.map { index in
+            if index < prefix { return style(at: index) }
+            if index >= new.count - suffix { return style(at: old.count - (new.count - index)) }
+            let corresponding = prefix + min(index - prefix, max(0, old.count - prefix - suffix - 1))
+            return corresponding < old.count ? style(at: corresponding) : middle
+        }
+        layout.paragraphs = formats
+        textLayout = layout
+    }
+
     var label: String {
         switch kind {
         case .text: return text.split(separator: "\n").first.map { String($0.prefix(26)) } ?? "文本框"

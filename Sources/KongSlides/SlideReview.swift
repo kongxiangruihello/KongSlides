@@ -10,10 +10,17 @@ enum SlideReviewMode {
 }
 
 struct SlideReviewRow: Identifiable {
-    var id = UUID()
+    struct ID: Hashable {
+        let slide: UUID
+        let object: UUID?
+        let title: String
+        let detail: String
+    }
+
+    var id: ID { ID(slide: slideID, object: objectID, title: title, detail: detail) }
     let slideID: UUID
     let objectID: UUID?
-    let page: Int
+    var page: Int
     let title: String
     let detail: String
     var source: String? = nil

@@ -158,15 +158,20 @@ struct EditorView: View {
             TextField("搜索标题、正文或讲稿", text: $search)
                 .textFieldStyle(.roundedBorder)
                 .padding(.horizontal, 12)
-            List(selection: Binding<UUID?>(
-                get: { slide.id }, set: { if let id = $0, id != slide.id { objectID = nil; slideID = id } }
-            )) {
-                ForEach(filteredSlides) { row in
-                    slideRow(row).tag(row.id)
+            ScrollViewReader { scroll in
+                List(selection: Binding<UUID?>(
+                    get: { slide.id }, set: { if let id = $0, id != slide.id { objectID = nil; slideID = id } }
+                )) {
+                    ForEach(filteredSlides) { row in
+                        slideRow(row).tag(row.id).id(row.id)
+                    }
+                    .onMove(perform: search.isEmpty ? reorder : nil)
                 }
-                .onMove(perform: search.isEmpty ? reorder : nil)
+                .listStyle(.sidebar)
+                .onChange(of: slide.id) {
+                    if reviewMode != nil { scroll.scrollTo(slide.id, anchor: .center) }
+                }
             }
-            .listStyle(.sidebar)
         }
         .padding(.top, 16)
         .background(Color(nsColor: .controlBackgroundColor))
@@ -241,7 +246,7 @@ struct EditorView: View {
         let width = CGFloat(object.width) * scale
         let height = CGFloat(object.height) * scale
         if editingID == object.id {
-            TextEditor(text: objectBinding(object.id, \.text, fallback: ""))
+            TextEditor(text: textBinding(object.id))
                 .font(.system(size: object.fontSize * scale, weight: object.bold ? .bold : .regular))
                 .foregroundStyle(Color(nsColor: Palette.color(object.color)))
                 .scrollContentBackground(.hidden)
@@ -301,12 +306,18 @@ struct EditorView: View {
                     let object = slide.objects[selection]
                     Text(object.label).font(.headline).lineLimit(2)
                     if object.kind == .text {
-                        TextEditor(text: objectBinding(object.id, \.text, fallback: ""))
+                        TextEditor(text: textBinding(object.id))
                             .frame(height: 82)
                             .border(.secondary.opacity(0.22))
                             .accessibilityLabel("文本框内容")
                         number("字号", object: object, key: \.fontSize, range: 8...200)
                         Toggle("粗体", isOn: objectBinding(object.id, \.bold, fallback: false))
+                        Menu("文字对齐") {
+                            Button("左对齐") { setAlignment(.left, for: object.id) }
+                            Button("居中") { setAlignment(.center, for: object.id) }
+                            Button("右对齐") { setAlignment(.right, for: object.id) }
+                            Button("两端对齐") { setAlignment(.justified, for: object.id) }
+                        }
                     }
                     if object.kind != .image {
                         colorMenu(object.kind == .text ? "文字颜色" : "填充颜色",
@@ -378,6 +389,32 @@ struct EditorView: View {
 
     private func slideBinding<Value>(_ key: WritableKeyPath<Slide, Value>) -> Binding<Value> {
         Binding(get: { slide[keyPath: key] }, set: { document.deck.slides[index][keyPath: key] = $0 })
+    }
+
+    private func setAlignment(_ alignment: SlideParagraph.Alignment, for id: UUID) {
+        guard let position = slide.objects.firstIndex(where: { $0.id == id }) else { return }
+        var object = slide.objects[position]
+        var layout = object.textLayout ?? .init()
+        let count = object.text.components(separatedBy: "\n").count
+        layout.paragraphs = (0..<count).map { index in
+            var style = layout.paragraphs.indices.contains(index) ? layout.paragraphs[index] : .init()
+            style.alignment = alignment
+            return style
+        }
+        object.textLayout = layout
+        document.deck.slides[index].objects[position] = object
+    }
+
+    private func textBinding(_ id: UUID) -> Binding<String> {
+        Binding(
+            get: { slide.objects.first { $0.id == id }?.text ?? "" },
+            set: { value in
+                guard let position = slide.objects.firstIndex(where: { $0.id == id }) else { return }
+                var object = slide.objects[position]
+                object.replaceText(with: value)
+                document.deck.slides[index].objects[position] = object
+            }
+        )
     }
 
     private func objectBinding<Value>(_ id: UUID, _ key: WritableKeyPath<SlideObject, Value>,
@@ -535,7 +572,7 @@ struct EditorView: View {
     private func reviewPanel(_ mode: SlideReviewMode) -> some View {
         SlideReviewPanel(
             mode: mode,
-            rows: mode == .imported ? SlideReviewRow.imported(deck) : preflightRows,
+            rows: mode == .imported ? SlideReviewRow.imported(deck) : currentPreflightRows,
             pageCount: mode == .imported ? deck.slides.filter { $0.importReport != nil }.count : preflightPageCount,
             checking: mode == .preflight && checkingPreflight,
             refresh: runPreflight,
@@ -548,6 +585,16 @@ struct EditorView: View {
                 objectID = target.objects.first { $0.id == row.objectID }?.id
             }
         )
+    }
+
+    private var currentPreflightRows: [SlideReviewRow] {
+        let pageNumber = Dictionary(uniqueKeysWithValues: deck.slides.enumerated().map { ($0.element.id, $0.offset + 1) })
+        return preflightRows.compactMap { row in
+            guard let page = pageNumber[row.slideID] else { return nil }
+            var current = row
+            current.page = page
+            return current
+        }
     }
 
     private func runPreflight() {
