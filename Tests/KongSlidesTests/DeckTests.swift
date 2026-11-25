@@ -49,6 +49,15 @@ final class DeckTests: XCTestCase {
         XCTAssertTrue(notes.contains("<p:ph type=\"body\""))
         let relations = try unzip(url, "ppt/slides/_rels/slide1.xml.rels")
         XCTAssertTrue(relations.contains("../media/\(imageID.uuidString).png"))
+
+        let imported = try PowerPoint.read(url, prepareImage: { $0 })
+        XCTAssertEqual(imported.deck.slides.count, 2)
+        XCTAssertEqual(imported.deck.slides.first?.objects.map(\.kind), [.text, .text, .rectangle, .image])
+        XCTAssertEqual(imported.deck.slides.first?.objects.first?.text, "礼乐 & 政治 <原文>")
+        XCTAssertEqual(imported.deck.slides.first?.speakerNotes, slide.speakerNotes)
+        XCTAssertEqual(imported.deck.images.values.first, deck.images[imageID])
+        XCTAssertEqual(imported.approximatedSlides, [])
+
     }
 
     private func unzip(_ url: URL, _ path: String) throws -> String {

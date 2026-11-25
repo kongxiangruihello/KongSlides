@@ -40,6 +40,8 @@ struct EditorView: View {
     @State private var objectID: UUID?
     @State private var editingID: UUID?
     @State private var linkedError: String?
+    @State private var importNotice: String?
+    @State private var importing = false
     @State private var showNotes = true
     @State private var search = ""
     @State private var presenter = PresentationController()
@@ -77,6 +79,11 @@ struct EditorView: View {
         )) {
             Button("好", role: .cancel) { linkedError = nil }
         } message: { Text(linkedError ?? "") }
+        .alert("PPTX 已导入", isPresented: Binding(
+            get: { importNotice != nil }, set: { if !$0 { importNotice = nil } }
+        )) {
+            Button("好", role: .cancel) { importNotice = nil }
+        } message: { Text(importNotice ?? "") }
     }
 
     private var controls: some View {
@@ -103,9 +110,11 @@ struct EditorView: View {
                 showNotes.toggle()
             } label: { Label("讲稿", systemImage: showNotes ? "note.text.badge.minus" : "note.text") }
             Menu {
+                Button("导入 PPTX 到当前课件…", action: importPowerPoint).disabled(importing)
+                Divider()
                 Button("导出可编辑 PPTX…") { export(.powerPoint) }
                 Button("导出投影 PDF…") { export(.pdf) }
-            } label: { Label("导出", systemImage: "square.and.arrow.up") }
+            } label: { Label(importing ? "正在导入" : "交换文件", systemImage: "arrow.left.arrow.right") }
             .fixedSize()
             Button {
                 presenter.start(deck: deck, at: index)
@@ -172,6 +181,13 @@ struct EditorView: View {
             Button("复制此页") { duplicateSlide(row.id) }
             Button("上移一页") { moveSlide(row.id, delta: -1) }.disabled(row.id == deck.slides.first?.id)
             Button("下移一页") { moveSlide(row.id, delta: 1) }.disabled(row.id == deck.slides.last?.id)
+            if !row.section.isEmpty {
+                Divider()
+                Button("上移整章") { moveSection(row.id, delta: -1) }
+                    .disabled(adjacentSection(row.id, delta: -1) == nil || !search.isEmpty)
+                Button("下移整章") { moveSection(row.id, delta: 1) }
+                    .disabled(adjacentSection(row.id, delta: 1) == nil || !search.isEmpty)
+            }
             Button("删除此页", role: .destructive) { deleteSlide(row.id) }
         }
     }
@@ -412,18 +428,40 @@ struct EditorView: View {
         document.deck = (try? updated.validated()) ?? updated
     }
 
+    private func moveSection(_ id: UUID, delta: Int) {
+        guard let source = sectionRange(id),
+              let adjacent = adjacentSection(id, delta: delta) else { return }
+        let current = slide.id
+        document.deck.slides.move(fromOffsets: IndexSet(integersIn: source),
+                                  toOffset: delta < 0 ? adjacent.lowerBound : adjacent.upperBound)
+        slideID = current
+    }
+
+    private func sectionRange(_ id: UUID) -> Range<Int>? {
+        guard let position = deck.slides.firstIndex(where: { $0.id == id }) else { return nil }
+        let section = deck.slides[position].section
+        var first = position
+        var last = position + 1
+        while first > 0 && deck.slides[first - 1].section == section { first -= 1 }
+        while last < deck.slides.count && deck.slides[last].section == section { last += 1 }
+        return first..<last
+    }
+
+    private func adjacentSection(_ id: UUID, delta: Int) -> Range<Int>? {
+        guard let range = sectionRange(id) else { return nil }
+        let boundary = delta < 0 ? range.lowerBound - 1 : range.upperBound
+        guard deck.slides.indices.contains(boundary) else { return nil }
+        return sectionRange(deck.slides[boundary].id)
+    }
+
     private func addImage() {
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.image]
         guard panel.runModal() == .OK, let url = panel.url else { return }
         do {
             guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
-                  let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
-                      kCGImageSourceCreateThumbnailFromImageAlways: true,
-                      kCGImageSourceCreateThumbnailWithTransform: true,
-                      kCGImageSourceThumbnailMaxPixelSize: 2048
-                  ] as CFDictionary),
-                  let png = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]) else {
+                  let image = PhotoStorage.thumbnail(source),
+                  let png = PhotoStorage.png(image) else {
                 throw CocoaError(.fileReadCorruptFile)
             }
             let scale = min(460.0 / Double(image.width), 295.0 / Double(image.height), 1.0)
@@ -439,6 +477,48 @@ struct EditorView: View {
         } catch { linkedError = "无法读取这张图片。\n\(error.localizedDescription)" }
     }
 
+    private func importPowerPoint() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [ExportType.powerPoint.contentType]
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        importing = true
+        Task { @MainActor in
+            defer { importing = false }
+            do {
+                let imported = try await Task.detached(priority: .userInitiated) {
+                    try PowerPoint.read(url) { data in
+                        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+                              let image = PhotoStorage.thumbnail(source) else { return nil }
+                        return PhotoStorage.png(image)
+                    }
+                }.value
+                var updated = deck
+                let title = url.deletingPathExtension().lastPathComponent
+                updated.slides.append(contentsOf: imported.deck.slides.map { original in
+                    var copy = original
+                    copy.section = title
+                    return copy
+                })
+                updated.images.merge(imported.deck.images, uniquingKeysWith: { current, _ in current })
+                document.deck = updated
+                search = ""
+                slideID = imported.deck.slides.first?.id
+
+                let total = imported.deck.slides.count
+                let pages = imported.approximatedSlides
+                if pages.isEmpty {
+                    importNotice = "已将 \(total) 页追加到当前课件。请核对中文字体和断行。"
+                } else {
+                    let list = pages.prefix(24).map(String.init).joined(separator: "、")
+                    let suffix = pages.count > 24 ? "等 \(pages.count) 页" : "页"
+                    importNotice = "已将 \(total) 页追加到当前课件。源文件第 \(list) \(suffix)含有近似转换或跳过的内容，请核对原片。"
+                }
+            } catch {
+                linkedError = "无法导入这份 PPTX。\n\(error.localizedDescription)"
+            }
+        }
+    }
+
     private func export(_ type: ExportType) {
         let panel = NSSavePanel()
         panel.allowedContentTypes = [type.contentType]
@@ -450,6 +530,26 @@ struct EditorView: View {
             case .powerPoint: try PowerPoint.write(deck, to: url)
             }
         } catch { linkedError = error.localizedDescription }
+    }
+}
+
+private enum PhotoStorage {
+    static func thumbnail(_ source: CGImageSource) -> CGImage? {
+        CGImageSourceCreateThumbnailAtIndex(source, 0, [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: 2048
+        ] as CFDictionary)
+    }
+
+    static func png(_ image: CGImage) -> Data? {
+        guard let data = CFDataCreateMutable(nil, 0),
+              let destination = CGImageDestinationCreateWithData(data, UTType.png.identifier as CFString, 1, nil) else {
+            return nil
+        }
+        CGImageDestinationAddImage(destination, image, nil)
+        guard CGImageDestinationFinalize(destination) else { return nil }
+        return data as Data
     }
 }
 
