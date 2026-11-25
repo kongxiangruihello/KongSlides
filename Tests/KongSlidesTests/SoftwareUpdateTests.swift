@@ -50,12 +50,48 @@ final class SoftwareUpdateTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: folder) }
         try writeApp(installed, version: "0.1.1")
         try writeApp(staged, version: "0.1.2")
-        try UpdateInstallation.swap(installed, staged)
+        try UpdateInstallation.install(staged, at: installed, replacing: AppVersion("0.1.1"))
         XCTAssertEqual(UpdateInstallation.version(of: installed), AppVersion("0.1.2"))
         XCTAssertEqual(UpdateInstallation.version(of: staged), AppVersion("0.1.1"))
         try UpdateInstallation.swap(installed, staged)
         XCTAssertEqual(UpdateInstallation.version(of: installed), AppVersion("0.1.1"))
         XCTAssertEqual(UpdateInstallation.version(of: staged), AppVersion("0.1.2"))
+    }
+
+    func testCanInstallAndUndoAtNewLocationWithoutTouchingOriginal() throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let old = folder.appendingPathComponent("Downloads/KongSlides.app", isDirectory: true)
+        let new = folder.appendingPathComponent("Applications/KongSlides.app", isDirectory: true)
+        let staged = folder.appendingPathComponent("Applications/.staging/KongSlides.app", isDirectory: true)
+        try writeApp(old, version: "0.1.2")
+        try writeApp(staged, version: "0.1.3")
+        XCTAssertNil(try UpdateInstallation.installedVersion(at: new))
+        try UpdateInstallation.install(staged, at: new, replacing: nil)
+        XCTAssertEqual(try UpdateInstallation.installedVersion(at: new), AppVersion("0.1.3"))
+        XCTAssertEqual(try UpdateInstallation.installedVersion(at: old), AppVersion("0.1.2"))
+        try UpdateInstallation.placeExclusively(new, at: staged)
+        XCTAssertNil(try UpdateInstallation.installedVersion(at: new))
+        XCTAssertEqual(try UpdateInstallation.installedVersion(at: staged), AppVersion("0.1.3"))
+    }
+
+    func testSelectedLocationProtectsUnrelatedFilesAndChangedVersions() throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let target = folder.appendingPathComponent("KongSlides.app")
+        let staged = folder.appendingPathComponent(".staging/KongSlides.app", isDirectory: true)
+        try writeApp(staged, version: "0.1.3")
+        let unrelated = Data("preserve".utf8)
+        try unrelated.write(to: target)
+        XCTAssertThrowsError(try UpdateInstallation.install(staged, at: target, replacing: nil))
+        XCTAssertEqual(try Data(contentsOf: target), unrelated)
+        try FileManager.default.removeItem(at: target)
+        try FileManager.default.createSymbolicLink(at: target, withDestinationURL: folder.appendingPathComponent("missing"))
+        XCTAssertThrowsError(try UpdateInstallation.install(staged, at: target, replacing: nil))
+        try FileManager.default.removeItem(at: target)
+        try writeApp(target, version: "0.1.4")
+        XCTAssertThrowsError(try UpdateInstallation.install(staged, at: target, replacing: AppVersion("0.1.2")))
+        XCTAssertEqual(try UpdateInstallation.installedVersion(at: target), AppVersion("0.1.4"))
     }
 
     private func writeApp(_ url: URL, version: String) throws {

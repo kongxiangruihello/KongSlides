@@ -46,62 +46,67 @@ enum InstallUpdate {
     @MainActor
     static func main() {
         let args = Array(CommandLine.arguments.dropFirst())
-        guard args.count == 4, let pid = pid_t(args[0]), pid > 1,
+        guard args.count == 6, let pid = pid_t(args[0]), pid > 1,
               let requested = AppVersion(args[3]) else { return }
 
-        let current = URL(fileURLWithPath: args[1], isDirectory: true).standardizedFileURL
+        let source = URL(fileURLWithPath: args[1], isDirectory: true).standardizedFileURL
         let directory = URL(fileURLWithPath: args[2], isDirectory: true).standardizedFileURL
+        let destination = URL(fileURLWithPath: args[4], isDirectory: true).standardizedFileURL
         let candidate = directory.appendingPathComponent("KongSlides.app", isDirectory: true)
+        let expected = AppVersion(args[5])
         let prefix = UpdateInstallation.stagePrefix
-        guard directory.deletingLastPathComponent().path == current.deletingLastPathComponent().path,
+        guard args[5].isEmpty || expected != nil,
+              directory.deletingLastPathComponent().path == destination.deletingLastPathComponent().path,
               directory.lastPathComponent.hasPrefix(prefix),
               UUID(uuidString: String(directory.lastPathComponent.dropFirst(prefix.count))) != nil,
               directory.resolvingSymlinksInPath().path == directory.path,
-              current.pathExtension == "app",
-              let old = UpdateInstallation.version(of: current), requested > old else { return }
+              source.pathExtension == "app", destination.pathExtension == "app",
+              source.path == destination.path || destination.lastPathComponent == "KongSlides.app",
+              expected.map({ $0 < requested }) ?? true else { return }
 
-        guard let lock = makeInstallLock(current) else {
-            try? FileManager.default.removeItem(at: directory)
+        let files = FileManager.default
+        guard let lock = makeInstallLock(destination) else {
+            try? files.removeItem(at: directory)
             report("无法取得更新锁，可能有另一个更新正在安装。")
             return
         }
         defer { close(lock) }
         guard waitForExit(pid) else {
-            try? FileManager.default.removeItem(at: directory)
+            try? files.removeItem(at: directory)
             report("应用仍在运行，本次更新已取消。请在菜单中重新检查更新。")
             return
         }
 
-        guard UpdateInstallation.version(of: current) == old,
-              UpdateInstallation.version(of: candidate) == requested,
-              (try? UpdateInstallation.runSystemTool("/usr/bin/codesign",
-                    arguments: ["--verify", "--strict", "--deep", candidate.path])) == true else {
-            try? FileManager.default.removeItem(at: directory)
-            _ = launchApp(current)
-            report("应用或安装包在退出期间发生变化，请重新检查更新。")
+        do {
+            guard UpdateInstallation.version(of: candidate) == requested,
+                  try UpdateInstallation.runSystemTool("/usr/bin/codesign",
+                      arguments: ["--verify", "--strict", "--deep", candidate.path]) else {
+                throw CocoaError(.fileReadCorruptFile)
+            }
+            try UpdateInstallation.install(candidate, at: destination, replacing: expected)
+        } catch {
+            try? files.removeItem(at: directory)
+            _ = launchApp(source)
+            report("无法在所选位置安装。该位置可能已被占用、发生变化或不可写。请重新检查更新。")
             return
         }
 
-        do {
-            try UpdateInstallation.swap(current, candidate)
-        } catch {
-            try? FileManager.default.removeItem(at: directory)
-            _ = launchApp(current)
-            report("无法替换当前应用。请检查应用所在文件夹的写入权限。")
-            return
-        }
-
-        if launchApp(current) {
-            try? FileManager.default.removeItem(at: directory)
+        if launchApp(destination) {
+            try? files.removeItem(at: directory)
             return
         }
         do {
-            try UpdateInstallation.swap(current, candidate)
-            try? FileManager.default.removeItem(at: directory)
-            _ = launchApp(current)
-            report("新版未能重新打开，已恢复旧版。")
+            if expected == nil {
+                try UpdateInstallation.placeExclusively(destination, at: candidate)
+            } else {
+                try UpdateInstallation.swap(destination, candidate)
+            }
+            try? files.removeItem(at: directory)
+            _ = launchApp(source)
+            report("新版未能重新打开，已撤销本次安装。")
         } catch {
-            report("新版未能重新打开。旧版仍保存在 \(candidate.path)。")
+            let detail = expected == nil ? "请在 Finder 中核对 \(destination.path)。" : "旧版保留在 \(candidate.path)。"
+            report("新版未能重新打开。\(detail)")
         }
     }
 }

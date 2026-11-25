@@ -107,6 +107,37 @@ public enum UpdateInstallation {
         return AppVersion(version)
     }
 
+    // lstat distinguishes a vacant location from an unrelated file, including a dangling symlink.
+    public static func installedVersion(at app: URL) throws -> AppVersion? {
+        var entry = stat()
+        if lstat(app.path, &entry) != 0 {
+            if errno == ENOENT { return nil }
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        guard let version = version(of: app) else { throw CocoaError(.fileWriteFileExists) }
+        return version
+    }
+
+    public static func install(_ candidate: URL, at destination: URL, replacing expected: AppVersion?) throws {
+        guard try installedVersion(at: destination) == expected else {
+            throw CocoaError(.fileWriteFileExists)
+        }
+        if expected == nil {
+            try placeExclusively(candidate, at: destination)
+        } else {
+            try swap(destination, candidate)
+        }
+    }
+
+    public static func placeExclusively(_ source: URL, at destination: URL) throws {
+        let result = source.path.withCString { from in
+            destination.path.withCString { to in
+                renameatx_np(AT_FDCWD, from, AT_FDCWD, to, UInt32(RENAME_EXCL))
+            }
+        }
+        guard result == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+    }
+
     public static func swap(_ original: URL, _ replacement: URL) throws {
         let result = original.path.withCString { source in
             replacement.path.withCString { destination in

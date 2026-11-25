@@ -92,10 +92,19 @@ final class SoftwareUpdate {
             let downloaded = downloadFolder.appendingPathComponent("update.zip")
             try files.moveItem(at: archive, to: downloaded)
 
-            let app = Bundle.main.bundleURL
-            let update = try await Task.detached(priority: .userInitiated) {
-                try StagedUpdate.prepare(archive: downloaded, offer: offer, current: app, version: version)
-            }.value
+            let app = Bundle.main.bundleURL.resolvingSymlinksInPath().standardizedFileURL
+            let update: StagedUpdate
+            do {
+                update = try await prepare(downloaded, offer: offer, source: app, destination: app,
+                                           expected: version)
+            } catch UpdateProblem.appLocation {
+                guard let destination = chooseDestination(for: offer.version),
+                      destination.path != app.path else { return }
+                let existing = try StagedUpdate.versionAtDestination(destination)
+                if let existing, existing >= offer.version { throw UpdateProblem.destinationOccupied }
+                update = try await prepare(downloaded, offer: offer, source: app,
+                                           destination: destination, expected: existing)
+            }
             staged = update
             offerInstallation(update)
         } catch {
@@ -106,10 +115,46 @@ final class SoftwareUpdate {
         #endif
     }
 
+    private func prepare(_ archive: URL, offer: UpdateOffer, source: URL,
+                         destination: URL, expected: AppVersion?) async throws -> StagedUpdate {
+        try await Task.detached(priority: .userInitiated) {
+            try StagedUpdate.prepare(archive: archive, offer: offer, source: source,
+                                     destination: destination, expected: expected)
+        }.value
+    }
+
+    private func chooseDestination(for version: AppVersion) -> URL? {
+        let prompt = NSAlert()
+        prompt.messageText = "请选择新版的安装位置"
+        prompt.informativeText = "当前运行位置无法原位更新。您可以把已下载的 KongSlides \(version) 安装到可写的文件夹。"
+        prompt.addButton(withTitle: "选择文件夹…")
+        prompt.addButton(withTitle: "稍后")
+        guard prompt.runModal() == .alertFirstButtonReturn else { return nil }
+
+        let files = FileManager.default
+        let personalApplications = files.homeDirectoryForCurrentUser.appendingPathComponent("Applications", isDirectory: true)
+        let panel = NSOpenPanel()
+        panel.message = "请选择安装 KongSlides.app 的文件夹。"
+        panel.prompt = "选为安装位置"
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.directoryURL = files.fileExists(atPath: personalApplications.path)
+            ? personalApplications : files.homeDirectoryForCurrentUser
+        guard panel.runModal() == .OK, let folder = panel.url else { return nil }
+        return folder.resolvingSymlinksInPath().standardizedFileURL
+            .appendingPathComponent("KongSlides.app", isDirectory: true)
+    }
+
     private func offerInstallation(_ update: StagedUpdate) {
         let prompt = NSAlert()
         prompt.messageText = "KongSlides \(update.version) 已准备好"
-        prompt.informativeText = "应用将按正常流程关闭，未保存的课件会先提示处理。随后安装新版并重新打开。"
+        if update.source.path == update.destination.path {
+            prompt.informativeText = "应用将按正常流程关闭，未保存的课件会先提示处理。随后安装新版并重新打开。"
+        } else {
+            let operation = update.expected == nil ? "安装到" : "替换"
+            prompt.informativeText = "应用将先按正常流程关闭，然后\(operation) \(update.destination.path) 并打开新版。"
+        }
         prompt.addButton(withTitle: "退出并安装")
         prompt.addButton(withTitle: "稍后")
         guard prompt.runModal() == .alertFirstButtonReturn else { return }
@@ -124,12 +169,13 @@ final class SoftwareUpdate {
             try? FileManager.default.removeItem(at: staged.directory)
             return
         }
-        let helper = staged.current.appendingPathComponent("Contents/Helpers/KongSlidesUpdater")
+        let helper = staged.source.appendingPathComponent("Contents/Helpers/KongSlidesUpdater")
         let process = Process()
         process.executableURL = helper
         process.arguments = [
-            String(ProcessInfo.processInfo.processIdentifier), staged.current.path,
-            staged.directory.path, staged.version.description
+            String(ProcessInfo.processInfo.processIdentifier), staged.source.path,
+            staged.directory.path, staged.version.description, staged.destination.path,
+            staged.expected?.description ?? ""
         ]
         do {
             try process.run()
@@ -172,30 +218,50 @@ private enum UpdateProblem: LocalizedError {
     case connection
     case verification
     case appLocation
+    case destinationOccupied
 
     var errorDescription: String? {
         switch self {
         case .connection: "暂时无法从 GitHub 获取更新。请稍后重试。"
         case .verification: "安装包未通过校验，当前应用没有被替换。"
-        case .appLocation: "当前应用所在位置无法写入。请先把 KongSlides 移到可写的文件夹，或从发布页下载安装包。"
+        case .appLocation: "这个文件夹无法安装 KongSlides。请在检查更新时选择一个可写的文件夹。"
+        case .destinationOccupied: "所选位置已被占用，或已有同版或更高版本的 KongSlides。请打开已有版本，或选择其他文件夹。"
         }
     }
 }
 
 private struct StagedUpdate: Sendable {
-    let current: URL
+    let source: URL
+    let destination: URL
+    let expected: AppVersion?
     let directory: URL
     let version: AppVersion
     var installAuthorized = false
 
-    static func prepare(archive: URL, offer: UpdateOffer, current: URL, version: AppVersion) throws -> Self {
+    static func versionAtDestination(_ destination: URL) throws -> AppVersion? {
+        do {
+            return try UpdateInstallation.installedVersion(at: destination)
+        } catch let issue as CocoaError where issue.code == .fileWriteFileExists {
+            throw UpdateProblem.destinationOccupied
+        } catch {
+            throw UpdateProblem.appLocation
+        }
+    }
+
+    static func prepare(archive: URL, offer: UpdateOffer, source: URL,
+                        destination: URL, expected: AppVersion?) throws -> Self {
         guard try UpdateRepository.isMatchingArchive(archive, bytes: offer.bytes, sha256: offer.sha256) else {
             throw UpdateProblem.verification
         }
-        let app = current.resolvingSymlinksInPath().standardizedFileURL
-        guard !app.path.contains("/AppTranslocation/"), app.pathExtension == "app",
-              UpdateInstallation.version(of: app) == version else { throw UpdateProblem.appLocation }
-        let directory = app.deletingLastPathComponent()
+        guard !destination.path.contains("/AppTranslocation/"), destination.pathExtension == "app" else {
+            throw UpdateProblem.appLocation
+        }
+        do {
+            guard try versionAtDestination(destination) == expected else { throw UpdateProblem.destinationOccupied }
+        } catch where source.path == destination.path {
+            throw UpdateProblem.appLocation
+        }
+        let directory = destination.deletingLastPathComponent()
             .appendingPathComponent(UpdateInstallation.stagePrefix + UUID().uuidString, isDirectory: true)
         do {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false,
@@ -211,7 +277,8 @@ private struct StagedUpdate: Sendable {
                   try UpdateInstallation.runSystemTool("/usr/bin/codesign", arguments: ["--verify", "--strict", "--deep", candidate.path]) else {
                 throw UpdateProblem.verification
             }
-            return Self(current: app, directory: directory, version: offer.version)
+            return Self(source: source, destination: destination, expected: expected,
+                        directory: directory, version: offer.version)
         } catch {
             try? FileManager.default.removeItem(at: directory)
             throw error
