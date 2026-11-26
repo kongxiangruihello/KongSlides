@@ -94,6 +94,20 @@ final class SoftwareUpdateTests: XCTestCase {
         XCTAssertEqual(try UpdateInstallation.installedVersion(at: target), AppVersion("0.1.4"))
     }
 
+    func testSameParentResolvesForBothExistingStageAndVacantTarget() throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let actual = folder.appendingPathComponent("Actual", isDirectory: true)
+        let alias = folder.appendingPathComponent("Alias")
+        let stage = actual.appendingPathComponent(".staging", isDirectory: true)
+        try FileManager.default.createDirectory(at: stage, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: actual)
+        let target = alias.appendingPathComponent("KongSlides.app", isDirectory: true)
+        XCTAssertNil(try UpdateInstallation.installedVersion(at: target))
+        XCTAssertEqual(UpdateInstallation.parentDirectory(of: stage).path,
+                       UpdateInstallation.parentDirectory(of: target).path)
+    }
+
     private func writeApp(_ url: URL, version: String) throws {
         let folder = url.appendingPathComponent("Contents", isDirectory: true)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)

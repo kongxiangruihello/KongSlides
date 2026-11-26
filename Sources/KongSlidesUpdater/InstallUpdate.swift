@@ -56,10 +56,11 @@ enum InstallUpdate {
         let expected = AppVersion(args[5])
         let prefix = UpdateInstallation.stagePrefix
         guard args[5].isEmpty || expected != nil,
-              directory.deletingLastPathComponent().path == destination.deletingLastPathComponent().path,
+              UpdateInstallation.parentDirectory(of: directory).path ==
+                UpdateInstallation.parentDirectory(of: destination).path,
               directory.lastPathComponent.hasPrefix(prefix),
               UUID(uuidString: String(directory.lastPathComponent.dropFirst(prefix.count))) != nil,
-              directory.resolvingSymlinksInPath().path == directory.path,
+              (try? directory.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) == false,
               source.pathExtension == "app", destination.pathExtension == "app",
               source.path == destination.path || destination.lastPathComponent == "KongSlides.app",
               expected.map({ $0 < requested }) ?? true else { return }

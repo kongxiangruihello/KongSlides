@@ -261,7 +261,7 @@ private struct StagedUpdate: Sendable {
         } catch where source.path == destination.path {
             throw UpdateProblem.appLocation
         }
-        let directory = destination.deletingLastPathComponent()
+        let directory = UpdateInstallation.parentDirectory(of: destination)
             .appendingPathComponent(UpdateInstallation.stagePrefix + UUID().uuidString, isDirectory: true)
         do {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false,

@@ -95,6 +95,12 @@ public enum UpdateRepository {
 public enum UpdateInstallation {
     public static let stagePrefix = ".KongSlides-update-"
 
+    public static func parentDirectory(of item: URL) -> URL {
+        // Resolve the existing parent even when the app at the destination does not exist yet.
+        let parent = (item.path as NSString).deletingLastPathComponent
+        return URL(fileURLWithPath: parent, isDirectory: true).resolvingSymlinksInPath().standardizedFileURL
+    }
+
     public static func version(of app: URL) -> AppVersion? {
         try? installedVersion(at: app)
     }
