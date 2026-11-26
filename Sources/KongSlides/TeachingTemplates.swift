@@ -13,6 +13,7 @@ struct TeachingTemplate: Codable, Identifiable {
         self.slide.section = ""
         self.slide.speakerNotes = ""
         self.slide.importReport = nil
+        self.slide.hiddenInShow = nil
         self.images = SlideClipboard(slides: [slide], images: images).images
     }
 

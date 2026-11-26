@@ -10,7 +10,7 @@ struct KongSlidesApp: App {
 
     var body: some Scene {
         DocumentGroup(newDocument: SlidesDocument()) { file in
-            EditorView(document: file.$document)
+            EditorView(document: file.$document, fileURL: file.fileURL)
                 .frame(minWidth: 1040, minHeight: 660)
                 .tint(Color(nsColor: Palette.color(Palette.indigo)))
         }
@@ -47,6 +47,8 @@ struct SlideSurface: View {
 
 struct EditorView: View {
     @Binding var document: SlidesDocument
+    let fileURL: URL?
+    @Environment(\.newDocument) private var newDocument
     @State private var slideID: UUID?
     @State private var selectedPageIDs: Set<UUID> = []
     @State private var collapsedSections: Set<UUID> = []
@@ -72,6 +74,9 @@ struct EditorView: View {
     @FocusState private var canvasTextFocused: Bool
 
     private var deck: Deck { document.deck }
+    private var documentName: String {
+        fileURL?.deletingPathExtension().lastPathComponent ?? deck.importedTitle ?? deck.slides.first?.title ?? "KongSlides"
+    }
     private var index: Int { deck.slides.firstIndex { $0.id == slideID } ?? 0 }
     private var slide: Slide { deck.slides[index] }
     private var selectedPages: Set<UUID> { selectedPageIDs.intersection(deck.slides.map(\.id)) }
@@ -101,6 +106,12 @@ struct EditorView: View {
         }
         .background(Color(nsColor: .windowBackgroundColor))
         .background(EditorKeyMonitor(handle: handleShortcut))
+        .background(ImportedDraftName(title: fileURL == nil ? deck.importedTitle : nil))
+        .onAppear {
+            if fileURL == nil, deck.importedTitle != nil, deck.slides.contains(where: { $0.importReport != nil }) {
+                reviewMode = .imported
+            }
+        }
         .sheet(isPresented: $notesFocus, onDismiss: { selectedPageIDs = [slide.id] }) {
             NotesFocusView(document: $document, slideID: $slideID, fontSize: $notesFontSize)
         }
@@ -169,7 +180,8 @@ struct EditorView: View {
                 showNotes.toggle()
             } label: { Label("讲稿", systemImage: showNotes ? "note.text.badge.minus" : "note.text") }
             Menu {
-                Button("导入 PPTX 到当前课件…", action: importPowerPoint).disabled(importing)
+                Button("将 PPTX 打开为新课件…") { importPowerPoint(asNewDocument: true) }.disabled(importing)
+                Button("导入 PPTX 到当前课件…") { importPowerPoint(asNewDocument: false) }.disabled(importing)
                 Button("查看 PPTX 导入报告") { reviewMode = .imported }
                     .disabled(!deck.slides.contains { $0.importReport != nil })
                 Divider()
@@ -185,7 +197,9 @@ struct EditorView: View {
             Button(action: runPreflight) { Label("放映前检查", systemImage: "checklist") }
                 .disabled(checkingPreflight)
             Button {
-                presenter.start(deck: deck, at: index)
+                if !presenter.start(deck: deck, at: index) {
+                    linkedError = "课件中只有备用页。请先将至少一页设为正片。"
+                }
             } label: { Label("放映", systemImage: "play.fill") }
             .buttonStyle(.borderedProminent)
             .keyboardShortcut(.return, modifiers: [.command, .option])
@@ -282,6 +296,10 @@ struct EditorView: View {
             HStack(spacing: 7) {
                 Text(String(format: "%02d", position + 1)).monospacedDigit().foregroundStyle(.secondary)
                 Text(row.title).lineLimit(1)
+                if row.isBackup {
+                    Image(systemName: "eye.slash").foregroundStyle(.secondary)
+                        .accessibilityLabel("备用页").help("备用页，顺序放映时跳过")
+                }
             }
             .font(.caption)
         }
@@ -296,6 +314,8 @@ struct EditorView: View {
                 Button("删除所选 \(pages.count) 页", role: .destructive) { pendingDeletion = pages }
                 Divider()
             }
+            let makeBackup = pages.contains { id in deck.slides.first { $0.id == id }?.isBackup == false }
+            Button(makeBackup ? "设为备用页" : "设为正片") { setBackup(makeBackup, for: pages) }
             Button("复制此页") { duplicateSlides([row.id]) }
             Button("上移一页") { moveSlide(row.id, delta: -1) }.disabled(row.id == deck.slides.first?.id)
             Button("下移一页") { moveSlide(row.id, delta: 1) }.disabled(row.id == deck.slides.last?.id)
@@ -410,6 +430,8 @@ struct EditorView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 Text("版面属性").font(.headline)
+                Toggle("备用页", isOn: Binding(get: { slide.isBackup }, set: { setBackup($0, for: [slide.id]) }))
+                    .help("顺序放映时跳过，可在放映中手动调出。")
                 TextField("章节名称", text: slideBinding(\.section))
                 colorMenu("页背景", selection: slideBinding(\.background),
                           colors: [("米白", Palette.paper), ("纯白", "FFFFFF"), ("深蓝", Palette.ink), ("淡蓝", "EDF2FC")])
@@ -832,7 +854,7 @@ struct EditorView: View {
         } catch { linkedError = "无法读取这张图片。\n\(error.localizedDescription)" }
     }
 
-    private func importPowerPoint() {
+    private func importPowerPoint(asNewDocument: Bool) {
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [ExportType.powerPoint.contentType]
         guard panel.runModal() == .OK, let url = panel.url else { return }
@@ -847,6 +869,11 @@ struct EditorView: View {
                         return PhotoStorage.png(image)
                     }
                 }.value
+                if asNewDocument {
+                    let fresh = SlidesDocument(deck: imported.deck)
+                    newDocument(fresh)
+                    return
+                }
                 var updated = deck
                 let title = url.deletingPathExtension().lastPathComponent
                 updated.slides.append(contentsOf: imported.deck.slides.map { original in
@@ -927,16 +954,35 @@ struct EditorView: View {
         } catch { linkedError = "无法保存教学版式。\n\(error.localizedDescription)" }
     }
 
+    private func setBackup(_ enabled: Bool, for ids: Set<UUID>) {
+        var updated = deck
+        for position in updated.slides.indices where ids.contains(updated.slides[position].id) {
+            updated.slides[position].hiddenInShow = enabled ? true : nil
+        }
+        if updated != deck { document.deck = updated }
+    }
+
+    private func backupExportOption(for panel: NSSavePanel) -> NSButton? {
+        guard deck.slides.contains(where: \.isBackup) else { return nil }
+        let checkbox = NSButton(checkboxWithTitle: "包含备用页", target: nil, action: nil)
+        checkbox.state = .off
+        checkbox.setFrameSize(checkbox.fittingSize)
+        panel.accessoryView = checkbox
+        return checkbox
+    }
+
     private func exportTeachingPDF(_ format: TeachingPDF.Format) {
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.pdf]
-        panel.nameFieldStringValue = "\(deck.slides.first?.title ?? slide.title)-\(format.label).pdf"
+        panel.nameFieldStringValue = "\(documentName)-\(format.label).pdf"
+        let backupOption = format == .teacher ? nil : backupExportOption(for: panel)
         guard panel.runModal() == .OK, let url = panel.url else { return }
+        let includeBackups = backupOption?.state == .on
         let snapshot = deck
         Task { @MainActor in
             do {
                 try await Task.detached(priority: .userInitiated) {
-                    try TeachingPDF.write(snapshot, format: format, to: url)
+                    try TeachingPDF.write(snapshot, format: format, includeBackups: includeBackups, to: url)
                 }.value
             } catch { linkedError = "无法导出 PDF。\n\(error.localizedDescription)" }
         }
@@ -945,11 +991,12 @@ struct EditorView: View {
     private func export(_ type: ExportType) {
         let panel = NSSavePanel()
         panel.allowedContentTypes = [type.contentType]
-        panel.nameFieldStringValue = slide.title + "." + type.rawValue
+        panel.nameFieldStringValue = documentName + "." + type.rawValue
+        let backupOption = type == .pdf ? backupExportOption(for: panel) : nil
         guard panel.runModal() == .OK, let url = panel.url else { return }
         do {
             switch type {
-            case .pdf: try SlideDrawing.pdf(deck, to: url)
+            case .pdf: try SlideDrawing.pdf(deck, includeBackups: backupOption?.state == .on, to: url)
             case .powerPoint: try PowerPoint.write(deck, to: url)
             }
         } catch { linkedError = error.localizedDescription }

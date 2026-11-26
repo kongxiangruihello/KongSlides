@@ -23,7 +23,8 @@ enum TeachingPDF {
     private static let bodyColor = NSColor(srgbRed: 0.14, green: 0.17, blue: 0.22, alpha: 1)
     private static let ruleColor = NSColor(srgbRed: 0.79, green: 0.81, blue: 0.85, alpha: 1)
 
-    static func write(_ deck: Deck, format: Format, to url: URL) throws {
+    static func write(_ deck: Deck, format: Format, includeBackups: Bool = false, to url: URL) throws {
+        let pages = try deck.pagesForPDF(includeBackups: format == .teacher || includeBackups)
         guard let output = CFDataCreateMutable(nil, 0),
               let consumer = CGDataConsumer(data: output) else { throw CocoaError(.fileWriteUnknown) }
         var page = paper
@@ -34,7 +35,7 @@ enum TeachingPDF {
         do {
             switch format {
             case .teacher: try teacher(deck, in: context)
-            case .studentTwo, .studentThree: student(deck, perPage: format.slidesPerPage, in: context)
+            case .studentTwo, .studentThree: student(pages, images: deck.images, perPage: format.slidesPerPage, in: context)
             }
         } catch {
             context.closePDF()
@@ -61,7 +62,7 @@ enum TeachingPDF {
                 let first = offset == 0
                 pages += 1
                 context.beginPDFPage(nil)
-                heading("教师讲稿", detail: "幻灯片 \(index + 1) · \(slide.title)" + (first ? "" : " · 续页"),
+                heading("教师讲稿", detail: "幻灯片 \(index + 1) · \(slide.title)" + (slide.isBackup ? " · 备用页" : "") + (first ? "" : " · 续页"),
                         page: pages, in: context)
                 if first {
                     thumbnail(slide, images: deck.images, at: CGPoint(x: margin, y: 554), width: 340, in: context)
@@ -93,19 +94,21 @@ enum TeachingPDF {
         context.restoreGState()
     }
 
-    private static func student(_ deck: Deck, perPage: Int, in context: CGContext) {
+    private static func student(_ pages: [(offset: Int, element: Slide)], images: [UUID: Data],
+                                perPage: Int, in context: CGContext) {
         let rowHeight = 710.0 / Double(perPage)
-        for first in stride(from: 0, to: deck.slides.count, by: perPage) {
+        for first in stride(from: 0, to: pages.count, by: perPage) {
+            let chunk = pages[first..<min(first + perPage, pages.count)]
+            let labels = chunk.map { String($0.offset + 1) }.joined(separator: "、")
             context.beginPDFPage(nil)
-            heading("学生配布稿", detail: "幻灯片 \(first + 1)–\(min(first + perPage, deck.slides.count))",
-                    page: first / perPage + 1, in: context)
-            for (position, slide) in deck.slides[first..<min(first + perPage, deck.slides.count)].enumerated() {
+            heading("学生配布稿", detail: "幻灯片 \(labels)", page: first / perPage + 1, in: context)
+            for (position, page) in chunk.enumerated() {
                 let top = 752 - Double(position) * rowHeight
                 let width = 309.0
                 let bottom = top - 26 - width * Deck.size.height / Deck.size.width
-                label("幻灯片 \(first + position + 1)", at: CGPoint(x: margin, y: top - 14),
+                label("幻灯片 \(page.offset + 1)", at: CGPoint(x: margin, y: top - 14),
                       fontSize: 11, bold: true, in: context)
-                thumbnail(slide, images: deck.images, at: CGPoint(x: margin, y: bottom), width: width, in: context)
+                thumbnail(page.element, images: images, at: CGPoint(x: margin, y: bottom), width: width, in: context)
                 let left = margin + width + 18
                 label("课堂笔记", at: CGPoint(x: left, y: top - 14), fontSize: 11, bold: true, in: context)
                 for row in 1...7 {

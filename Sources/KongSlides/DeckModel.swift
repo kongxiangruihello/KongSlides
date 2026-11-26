@@ -148,6 +148,9 @@ struct Slide: Codable, Identifiable, Equatable {
     var speakerNotes = ""
     var objects: [SlideObject] = []
     var importReport: SlideImportReport?
+    var hiddenInShow: Bool?
+
+    var isBackup: Bool { hiddenInShow == true }
 
     var title: String {
         let title = objects.lazy.filter { $0.kind == .text }.map(\.label).first
@@ -174,6 +177,30 @@ struct Deck: Codable, Equatable {
     var schemaVersion = 1
     var slides: [Slide] = [Slide.titleSlide("新建课件", subtitle: "双击文字开始编辑")]
     var images: [UUID: Data] = [:]
+    var importedTitle: String?
+
+    func firstPresentationIndex(at startingIndex: Int) -> Int? {
+        guard !slides.isEmpty else { return nil }
+        let start = min(max(0, startingIndex), slides.count - 1)
+        if !slides[start].isBackup { return start }
+        return presentationIndex(after: start, step: 1) ?? presentationIndex(after: start, step: -1)
+    }
+
+    func presentationIndex(after index: Int, step: Int) -> Int? {
+        guard step == 1 || step == -1 else { return nil }
+        var next = index + step
+        while slides.indices.contains(next) {
+            if !slides[next].isBackup { return next }
+            next += step
+        }
+        return nil
+    }
+
+    func pagesForPDF(includeBackups: Bool) throws -> [(offset: Int, element: Slide)] {
+        let pages = slides.enumerated().filter { includeBackups || !$0.element.isBackup }
+        guard !pages.isEmpty else { throw SlideExportError.noRegularPages }
+        return pages
+    }
 
     func validated() throws -> Deck {
         guard schemaVersion == 1 else { throw CocoaError(.fileReadUnknown) }
@@ -203,5 +230,13 @@ struct Deck: Codable, Equatable {
         }
         result.images = result.images.filter { usedImages.contains($0.key) }
         return result
+    }
+}
+
+enum SlideExportError: LocalizedError {
+    case noRegularPages
+
+    var errorDescription: String? {
+        "课件中只有备用页。请勾选「包含备用页」，或将至少一页设为正片。"
     }
 }

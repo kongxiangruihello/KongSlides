@@ -105,8 +105,9 @@ enum PowerPoint {
                     }
                 }
             }
+            let visibility = slide.isBackup ? " show=\"0\"" : ""
             let slideXML = """
-            <p:sld \(namespace)><p:cSld>
+            <p:sld \(namespace)\(visibility)><p:cSld>
             <p:bg><p:bgPr>\(fill(slide.background))<a:effectLst/></p:bgPr></p:bg>
             \(shapeTree(shapes))
             </p:cSld>\(overrides)</p:sld>

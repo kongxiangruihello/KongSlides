@@ -21,6 +21,7 @@ struct SlidesDocument: FileDocument {
     var deck = Deck()
 
     init() {}
+    init(deck: Deck) { self.deck = deck }
     init(configuration: ReadConfiguration) throws {
         guard let data = configuration.file.regularFileContents else { throw CocoaError(.fileReadCorruptFile) }
         deck = try JSONDecoder().decode(Deck.self, from: data).validated()
@@ -68,7 +69,8 @@ enum SlideDrawing {
         return CGImage(pngDataProviderSource: provider, decode: nil, shouldInterpolate: true, intent: .defaultIntent)
     }
 
-    static func pdf(_ deck: Deck, to url: URL) throws {
+    static func pdf(_ deck: Deck, includeBackups: Bool = true, to url: URL) throws {
+        let pages = try deck.pagesForPDF(includeBackups: includeBackups)
         guard let buffer = CFDataCreateMutable(nil, 0),
               let consumer = CGDataConsumer(data: buffer) else {
             throw CocoaError(.fileWriteUnknown)
@@ -77,7 +79,7 @@ enum SlideDrawing {
         guard let context = CGContext(consumer: consumer, mediaBox: &page, nil) else {
             throw CocoaError(.fileWriteUnknown)
         }
-        for slide in deck.slides {
+        for (_, slide) in pages {
             context.beginPDFPage(nil)
             draw(slide, images: deck.images, in: context)
             context.endPDFPage()

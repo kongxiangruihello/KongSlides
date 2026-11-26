@@ -23,7 +23,7 @@ extension PowerPoint {
         let widthInset = (960 - cx * factor) / 2
         let heightInset = (540 - cy * factor) / 2
         let rootLinks = try archive.links(from: "ppt/presentation.xml")
-        var draft = Deck(slides: [])
+        var draft = Deck(slides: [], importedTitle: url.deletingPathExtension().lastPathComponent)
         var imageIDs: [String: UUID] = [:]
         let source = url.lastPathComponent
 
@@ -43,6 +43,7 @@ extension PowerPoint {
                 context.master?.child("cSld")?.child("bg")
             let backgroundColor = background?.child("bgPr").flatMap { context.color($0) }
             var slide = Slide(background: backgroundColor ?? "FFFFFF")
+            if ["0", "false"].contains(xml.value("show") ?? "") { slide.hiddenInShow = true }
             var diagnostics: [ImportDiagnostic] = []
             func note(_ kind: ImportDiagnostic.Kind, _ detail: String, object: UUID? = nil) {
                 let diagnostic = ImportDiagnostic(kind: kind, detail: detail, objectID: object)
