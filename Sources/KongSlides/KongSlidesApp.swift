@@ -53,6 +53,8 @@ struct EditorView: View {
     @State private var pageCommands = false
     @State private var pendingDeletion: Set<UUID> = []
     @State private var notesFocus = false
+    @State private var teachingSheet: TeachingSheet?
+    @ObservedObject private var templateStore = TeachingTemplateStore.shared
     @AppStorage("speakerNotesFontSize") private var notesFontSize = 16.0
     @State private var notesHeight = 108.0
     @GestureState private var notesResize = 0.0
@@ -102,6 +104,20 @@ struct EditorView: View {
         .sheet(isPresented: $notesFocus, onDismiss: { selectedPageIDs = [slide.id] }) {
             NotesFocusView(document: $document, slideID: $slideID, fontSize: $notesFontSize)
         }
+        .sheet(item: $teachingSheet) { sheet in
+            switch sheet {
+            case .outline:
+                TeachingOutlineView(templates: TeachingTemplate.builtIns + templateStore.items.filter(\.canGenerate)) {
+                    insert($0, at: index + 1, asObject: false)
+                }
+            case .templates:
+                TeachingTemplateView(library: templateStore) { item in
+                    var page = item.slide
+                    page.section = slide.section
+                    insert(SlideClipboard(slides: [page], images: item.images), at: index + 1, asObject: false)
+                }
+            }
+        }
         .alert("删除 \(pendingDeletion.count) 页幻灯片？", isPresented: Binding(
             get: { !pendingDeletion.isEmpty }, set: { if !$0 { pendingDeletion = [] } }
         )) {
@@ -136,6 +152,10 @@ struct EditorView: View {
                 Button("空白页") { addSlide(Slide()) }.keyboardShortcut("n", modifiers: [.command, .shift])
                 Button("标题页") { addSlide(.titleSlide("新章节", subtitle: "输入副标题")) }
                 Button("原文与解读") { addSlide(.readingSlide()) }
+                Divider()
+                Button("从提纲生成课件…") { teachingSheet = .outline }
+                Button("从教学版式新建…") { teachingSheet = .templates }
+                Button("保存当前页为版式…", action: saveCurrentTemplate)
             } label: { Label("新建页", systemImage: "plus.rectangle") }
             .fixedSize()
             Button { addObject(SlideObject()) } label: { Label("文字", systemImage: "textformat") }
@@ -155,6 +175,11 @@ struct EditorView: View {
                 Divider()
                 Button("导出可编辑 PPTX…") { export(.powerPoint) }
                 Button("导出投影 PDF…") { export(.pdf) }
+                Menu("导出讲稿与配布 PDF") {
+                    Button("教师讲稿版…") { exportTeachingPDF(.teacher) }
+                    Button("学生配布版 · 每页 2 张…") { exportTeachingPDF(.studentTwo) }
+                    Button("学生配布版 · 每页 3 张…") { exportTeachingPDF(.studentThree) }
+                }
             } label: { Label(importing ? "正在导入" : "交换文件", systemImage: "arrow.left.arrow.right") }
             .fixedSize()
             Button(action: runPreflight) { Label("放映前检查", systemImage: "checklist") }
@@ -884,6 +909,39 @@ struct EditorView: View {
         }
     }
 
+    private func saveCurrentTemplate() {
+        let alert = NSAlert()
+        alert.messageText = "保存当前页为教学版式"
+        alert.informativeText = "版式会保存对象、图片和样式。将它用于提纲生成时，按从上到下、从左到右的顺序选用前两个文本框放置标题和正文。"
+        let field = NSTextField(string: slide.title)
+        field.frame = CGRect(x: 0, y: 0, width: 285, height: 25)
+        alert.accessoryView = field
+        alert.addButton(withTitle: "保存")
+        alert.addButton(withTitle: "取消")
+        alert.window.initialFirstResponder = field
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let name = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { linkedError = "请输入版式名称。"; return }
+        do {
+            try templateStore.save(TeachingTemplate(name: name, slide: slide, images: deck.images))
+        } catch { linkedError = "无法保存教学版式。\n\(error.localizedDescription)" }
+    }
+
+    private func exportTeachingPDF(_ format: TeachingPDF.Format) {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.pdf]
+        panel.nameFieldStringValue = "\(deck.slides.first?.title ?? slide.title)-\(format.label).pdf"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        let snapshot = deck
+        Task { @MainActor in
+            do {
+                try await Task.detached(priority: .userInitiated) {
+                    try TeachingPDF.write(snapshot, format: format, to: url)
+                }.value
+            } catch { linkedError = "无法导出 PDF。\n\(error.localizedDescription)" }
+        }
+    }
+
     private func export(_ type: ExportType) {
         let panel = NSSavePanel()
         panel.allowedContentTypes = [type.contentType]
@@ -896,6 +954,11 @@ struct EditorView: View {
             }
         } catch { linkedError = error.localizedDescription }
     }
+}
+
+private enum TeachingSheet: String, Identifiable {
+    case outline, templates
+    var id: Self { self }
 }
 
 private enum PhotoStorage {

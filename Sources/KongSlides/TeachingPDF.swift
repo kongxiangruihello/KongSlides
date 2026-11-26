@@ -1,0 +1,152 @@
+import AppKit
+import CoreText
+
+enum TeachingPDF {
+    enum Format {
+        case teacher
+        case studentTwo
+        case studentThree
+
+        var label: String {
+            switch self {
+            case .teacher: "教师讲稿"
+            case .studentTwo: "学生配布稿-每页2张"
+            case .studentThree: "学生配布稿-每页3张"
+            }
+        }
+
+        var slidesPerPage: Int { self == .studentTwo ? 2 : 3 }
+    }
+
+    private static let paper = CGRect(x: 0, y: 0, width: 595.28, height: 841.89)
+    private static let margin = 42.0
+    private static let bodyColor = NSColor(srgbRed: 0.14, green: 0.17, blue: 0.22, alpha: 1)
+    private static let ruleColor = NSColor(srgbRed: 0.79, green: 0.81, blue: 0.85, alpha: 1)
+
+    static func write(_ deck: Deck, format: Format, to url: URL) throws {
+        guard let output = CFDataCreateMutable(nil, 0),
+              let consumer = CGDataConsumer(data: output) else { throw CocoaError(.fileWriteUnknown) }
+        var page = paper
+        guard let context = CGContext(consumer: consumer, mediaBox: &page, nil) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+
+        do {
+            switch format {
+            case .teacher: try teacher(deck, in: context)
+            case .studentTwo, .studentThree: student(deck, perPage: format.slidesPerPage, in: context)
+            }
+        } catch {
+            context.closePDF()
+            throw error
+        }
+        context.closePDF()
+        try (output as Data).write(to: url, options: .atomic)
+    }
+
+    private static func teacher(_ deck: Deck, in context: CGContext) throws {
+        var pages = 0
+        for (index, slide) in deck.slides.enumerated() {
+            let notesString = slide.speakerNotes.isEmpty ? "本页暂无讲稿" : slide.speakerNotes
+            let paragraph = NSMutableParagraphStyle()
+            paragraph.lineSpacing = 4
+            paragraph.paragraphSpacing = 5
+            let noteText = NSAttributedString(string: notesString, attributes: [
+                .font: NSFont.systemFont(ofSize: 13),
+                .foregroundColor: bodyColor, .paragraphStyle: paragraph
+            ])
+            let typesetter = CTFramesetterCreateWithAttributedString(noteText as CFAttributedString)
+            var offset = 0
+            repeat {
+                let first = offset == 0
+                pages += 1
+                context.beginPDFPage(nil)
+                heading("教师讲稿", detail: "幻灯片 \(index + 1) · \(slide.title)" + (first ? "" : " · 续页"),
+                        page: pages, in: context)
+                if first {
+                    thumbnail(slide, images: deck.images, at: CGPoint(x: margin, y: 554), width: 340, in: context)
+                    label("逐字讲稿", at: CGPoint(x: margin, y: 528), fontSize: 13, bold: true, in: context)
+                }
+                let frame = CGRect(x: margin, y: 52, width: paper.width - 2 * margin, height: first ? 458 : 700)
+                let laidOut = CTFramesetterCreateFrame(typesetter, CFRange(location: offset, length: 0),
+                                                       CGPath(rect: frame, transform: nil), nil)
+                let visible = CTFrameGetVisibleStringRange(laidOut)
+                context.textMatrix = .identity
+                CTFrameDraw(laidOut, context)
+                context.endPDFPage()
+                guard visible.length > 0, visible.location + visible.length > offset else {
+                    throw CocoaError(.fileWriteUnknown)
+                }
+                offset = visible.location + visible.length
+            } while offset < noteText.length
+        }
+    }
+
+    private static func student(_ deck: Deck, perPage: Int, in context: CGContext) {
+        let rowHeight = 710.0 / Double(perPage)
+        for first in stride(from: 0, to: deck.slides.count, by: perPage) {
+            context.beginPDFPage(nil)
+            heading("学生配布稿", detail: "幻灯片 \(first + 1)–\(min(first + perPage, deck.slides.count))",
+                    page: first / perPage + 1, in: context)
+            for (position, slide) in deck.slides[first..<min(first + perPage, deck.slides.count)].enumerated() {
+                let top = 752 - Double(position) * rowHeight
+                let width = 309.0
+                let bottom = top - 26 - width * Deck.size.height / Deck.size.width
+                label("幻灯片 \(first + position + 1)", at: CGPoint(x: margin, y: top - 14),
+                      fontSize: 11, bold: true, in: context)
+                thumbnail(slide, images: deck.images, at: CGPoint(x: margin, y: bottom), width: width, in: context)
+                let left = margin + width + 18
+                label("课堂笔记", at: CGPoint(x: left, y: top - 14), fontSize: 11, bold: true, in: context)
+                for row in 1...7 {
+                    let y = top - 28 - Double(row) * 21
+                    line(from: CGPoint(x: left, y: y), to: CGPoint(x: paper.width - margin, y: y), in: context)
+                }
+                let separator = top - rowHeight + 10
+                line(from: CGPoint(x: margin, y: separator),
+                     to: CGPoint(x: paper.width - margin, y: separator), in: context)
+            }
+            context.endPDFPage()
+        }
+    }
+
+    private static func heading(_ title: String, detail: String, page: Int, in context: CGContext) {
+        label(title, at: CGPoint(x: margin, y: 801), fontSize: 19, bold: true, in: context)
+        label(detail, at: CGPoint(x: margin, y: 776), fontSize: 11, bold: false, in: context)
+        line(from: CGPoint(x: margin, y: 764), to: CGPoint(x: paper.width - margin, y: 764), in: context)
+        label("KongSlides  ·  \(page)", at: CGPoint(x: margin, y: 30),
+              fontSize: 10, bold: false, in: context)
+    }
+
+    private static func thumbnail(_ slide: Slide, images: [UUID: Data], at point: CGPoint,
+                                  width: CGFloat, in context: CGContext) {
+        let scale = width / Deck.size.width
+        let frame = CGRect(origin: point, size: CGSize(width: width, height: Deck.size.height * scale))
+        context.saveGState()
+        context.clip(to: frame)
+        context.translateBy(x: point.x, y: point.y)
+        context.scaleBy(x: scale, y: scale)
+        SlideDrawing.draw(slide, images: images, in: context)
+        context.restoreGState()
+        context.setStrokeColor(ruleColor.cgColor)
+        context.setLineWidth(0.5)
+        context.stroke(frame)
+    }
+
+    private static func label(_ text: String, at point: CGPoint, fontSize: CGFloat, bold: Bool, in context: CGContext) {
+        let font = bold ? NSFont.boldSystemFont(ofSize: fontSize) : NSFont.systemFont(ofSize: fontSize)
+        let line = CTLineCreateWithAttributedString(NSAttributedString(string: text, attributes: [
+            .font: font, .foregroundColor: bodyColor
+        ]) as CFAttributedString)
+        context.textMatrix = .identity
+        context.textPosition = point
+        CTLineDraw(line, context)
+    }
+
+    private static func line(from start: CGPoint, to end: CGPoint, in context: CGContext) {
+        context.setStrokeColor(ruleColor.cgColor)
+        context.setLineWidth(0.6)
+        context.move(to: start)
+        context.addLine(to: end)
+        context.strokePath()
+    }
+}
