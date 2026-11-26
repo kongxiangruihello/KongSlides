@@ -71,15 +71,26 @@ enum TeachingPDF {
                 let laidOut = CTFramesetterCreateFrame(typesetter, CFRange(location: offset, length: 0),
                                                        CGPath(rect: frame, transform: nil), nil)
                 let visible = CTFrameGetVisibleStringRange(laidOut)
-                context.textMatrix = .identity
-                CTFrameDraw(laidOut, context)
+                drawNotes(laidOut, inside: frame, in: context)
                 context.endPDFPage()
-                guard visible.length > 0, visible.location + visible.length > offset else {
-                    throw CocoaError(.fileWriteUnknown)
-                }
-                offset = visible.location + visible.length
+                guard visible.location == offset, visible.length > 0 else { throw CocoaError(.fileWriteUnknown) }
+                offset += visible.length
             } while offset < noteText.length
         }
+    }
+
+    private static func drawNotes(_ frame: CTFrame, inside bounds: CGRect, in context: CGContext) {
+        guard let lines = CTFrameGetLines(frame) as? [CTLine], !lines.isEmpty else { return }
+        var positions = Array(repeating: CGPoint.zero, count: lines.count)
+        CTFrameGetLineOrigins(frame, CFRange(location: 0, length: 0), &positions)
+        context.saveGState()
+        context.clip(to: bounds)
+        context.textMatrix = .identity
+        for (line, position) in zip(lines, positions) {
+            context.textPosition = CGPoint(x: bounds.minX + position.x, y: bounds.minY + position.y)
+            CTLineDraw(line, context)
+        }
+        context.restoreGState()
     }
 
     private static func student(_ deck: Deck, perPage: Int, in context: CGContext) {

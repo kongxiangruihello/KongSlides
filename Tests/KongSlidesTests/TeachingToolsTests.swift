@@ -86,7 +86,10 @@ final class TeachingToolsTests: XCTestCase {
         try TeachingPDF.write(deck, format: .teacher, to: notesURL)
         let teacher = try XCTUnwrap(PDFDocument(url: notesURL))
         XCTAssertGreaterThan(teacher.pageCount, 5)
-        XCTAssertTrue((0..<teacher.pageCount).contains { teacher.page(at: $0)?.string?.contains(marker) == true })
+        let teacherPages = (0..<teacher.pageCount).compactMap { teacher.page(at: $0)?.string }
+        let teacherText = teacherPages.joined(separator: "\n")
+        XCTAssertEqual(teacherText.components(separatedBy: "Period context and historical interpretation.").count - 1, 115)
+        XCTAssertTrue(teacherText.contains(marker), "Tail of the continuation: \(teacherPages.prefix(6).map { $0.suffix(110) })")
 
         for (format, count) in [(TeachingPDF.Format.studentTwo, 3), (.studentThree, 2)] {
             let handoutURL = root.appendingPathComponent(format.label + ".pdf")
