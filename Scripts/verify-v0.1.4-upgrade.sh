@@ -6,6 +6,12 @@ root="$(cd "$root" && pwd -P)"
 helper_pid=""
 active_app=""
 cleanup() {
+    status=$?
+    if [[ "$status" != 0 ]]; then
+        echo "Desktop check failed (status $status)" >&2
+        find "$root" -maxdepth 3 -name '*.app' -print >&2
+        ps -ax -o pid,command | grep -E 'KongSlides.app/Contents/(MacOS|Helpers)' >&2 || true
+    fi
     if [[ -n "$helper_pid" ]]; then kill "$helper_pid" 2>/dev/null || true; fi
     if [[ -n "$active_app" ]]; then "$root/probe" "$active_app" quit >/dev/null 2>&1 || true; fi
     chmod u+w "$root/read-only" 2>/dev/null || true
@@ -56,10 +62,13 @@ upgrade() {
     local mode="$1" source="$2" target="$3" expected="$4" work pid next
     mkdir -p "$(dirname "$source")" "$(dirname "$target")"
     ditto "$root/old/KongSlides.app" "$source"
-    open -n -F -a "$source" "$root/Existing.kongslides"
+    echo "Starting desktop check: $mode"
+    open -n -F "$source"
     active_app="$source"
     pid="$(wait_for_app "$source")"
     [[ "$pid" =~ ^[0-9]+$ ]]
+    echo "Source is running (PID $pid)"
+    open -a "$source" "$root/Existing.kongslides"
     if [[ "$mode" == alternate ]]; then
         chmod a-w "$(dirname "$source")"
         [[ ! -w "$(dirname "$source")" ]]
@@ -72,6 +81,7 @@ upgrade() {
     helper_pid=$!
     "$root/probe" "$source" quit
 
+    echo "Source accepted quit; waiting for the updater to relaunch the destination."
     next="$(wait_for_app "$target" "$pid")"
     [[ "$next" =~ ^[0-9]+$ && "$next" != "$pid" ]]
     active_app="$target"
