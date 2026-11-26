@@ -1,0 +1,67 @@
+name: Publish KongSlides v0.1.3
+
+on:
+  push:
+    branches: [release-v0.1.3]
+    paths: [.github/workflows/publish-v0.1.3.yml]
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: kongslides-publish-v0.1.3
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      SOURCE_COMMIT: 6fc0aedea3161caa180939d1a91c901fda7b9188
+      BUILD_RUN: "45720236644"
+      EXPECTED_SHA256: ee0865b8eede750285a6a68b1552163c8e3d0de9f1f404a72740794b8e7520cf
+    steps:
+      - name: Verify the macOS build and prepare assets
+        shell: bash
+        run: |
+          read -r head result <<< "$(gh run view "$BUILD_RUN" --json headSha,conclusion --jq '[.headSha,.conclusion] | @tsv')"
+          [[ "$head" == "$SOURCE_COMMIT" && "$result" == success ]]
+          gh run download "$BUILD_RUN" --name KongSlides-macOS-preview --dir publish
+          cd publish
+          mv KongSlides-macOS-preview.zip KongSlides-0.1.3-macOS-preview.zip
+          printf '%s  %s\n' "$EXPECTED_SHA256" KongSlides-0.1.3-macOS-preview.zip > SHA256SUMS
+          sha256sum --check SHA256SUMS
+          unzip -tq KongSlides-0.1.3-macOS-preview.zip
+      - name: Publish the preview release
+        shell: bash
+        run: |
+          cat > publish/notes.md <<'EOF'
+          - 启用蓝底叠放幻灯片图标，与 Kong 系列风格一致。
+          - 更新时遇到原位置不可写，可选择可写的文件夹安装已经下载的新版。
+          - 安装前重新核对目标位置，保护同名无关文件及较新的 KongSlides。
+
+          在 KongSlides 菜单中可选择“检查更新…”。若旧版已经提示当前安装位置无法写入，请退出旧版，解压发布包后，把 `KongSlides.app` 拖入可写的“应用程序”文件夹，再从那里打开。
+
+          预览包适用于 **Apple 芯片、macOS 15 或更新版本**，使用临时签名。macOS 构建及 12 项自动化测试已通过。
+          EOF
+          if ! gh release view v0.1.3 --json isDraft >/dev/null 2>&1; then
+            gh release create v0.1.3 --target "$SOURCE_COMMIT" --title 'KongSlides 0.1.3 教学预览版' \
+              --draft --prerelease --notes-file publish/notes.md
+          fi
+
+          for asset in KongSlides-0.1.3-macOS-preview.zip SHA256SUMS; do
+            remote_digest="$(gh api "repos/$GH_REPO/releases" --jq ".[] | select(.tag_name == \"v0.1.3\") | .assets[] | select(.name == \"$asset\") | .digest")"
+            if [[ -z "$remote_digest" ]]; then
+              [[ "$(gh release view v0.1.3 --json isDraft --jq .isDraft)" == true ]]
+              gh release upload v0.1.3 "publish/$asset"
+              remote_digest="$(gh api "repos/$GH_REPO/releases" --jq ".[] | select(.tag_name == \"v0.1.3\") | .assets[] | select(.name == \"$asset\") | .digest")"
+            fi
+            local_digest="sha256:$(sha256sum "publish/$asset" | cut -d ' ' -f 1)"
+            [[ "$remote_digest" == "$local_digest" ]]
+          done
+
+          gh release edit v0.1.3 --draft=false --prerelease --latest=false
+          [[ "$(gh api "repos/$GH_REPO/commits/v0.1.3" --jq .sha)" == "$SOURCE_COMMIT" ]]
+          gh release view v0.1.3 --json url,isDraft,isPrerelease,assets --jq '{url,isDraft,isPrerelease,assets:[.assets[] | .name]}'
