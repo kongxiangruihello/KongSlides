@@ -79,7 +79,7 @@ final class TeachingToolsTests: XCTestCase {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
         defer { try? FileManager.default.removeItem(at: root) }
         var deck = Deck(slides: (1...5).map { Slide.titleSlide("Slide \($0)", subtitle: "Public material") })
-        let marker = "PRIVATE_NOTE_ONLY"
+        let marker = "PRIVATELECTUREMARKER"
         deck.slides[0].speakerNotes = String(repeating: "Period context and historical interpretation.\n", count: 115) + marker
 
         let notesURL = root.appendingPathComponent("notes.pdf")
@@ -89,7 +89,7 @@ final class TeachingToolsTests: XCTestCase {
         let teacherPages = (0..<teacher.pageCount).compactMap { teacher.page(at: $0)?.string }
         let teacherText = teacherPages.joined(separator: "\n")
         XCTAssertEqual(teacherText.components(separatedBy: "Period context and historical interpretation.").count - 1, 115)
-        XCTAssertTrue(teacherText.contains(marker), "Tail of the continuation: \(teacherPages.prefix(6).map { $0.suffix(110) })")
+        XCTAssertTrue(teacherText.contains(marker), "Last frames of the teacher PDF: \(teacherPages.prefix(6).map { $0.suffix(110) })")
 
         for (format, count) in [(TeachingPDF.Format.studentTwo, 3), (.studentThree, 2)] {
             let handoutURL = root.appendingPathComponent(format.label + ".pdf")
