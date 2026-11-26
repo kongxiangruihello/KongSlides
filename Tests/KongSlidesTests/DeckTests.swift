@@ -31,7 +31,9 @@ final class DeckTests: XCTestCase {
         let imageID = UUID()
         deck.images[imageID] = try XCTUnwrap(Data(base64Encoded:
             "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aTioAAAAASUVORK5CYII="))
-        slide.objects.append(SlideObject(kind: .image, width: 100, height: 100, imageID: imageID))
+        let crop = PictureCrop(left: 0.125, top: 0.1, right: 0.025, bottom: 0.15)
+        slide.objects.append(SlideObject(kind: .image, width: 100, height: 100, imageID: imageID,
+                                         pictureCrop: crop))
         deck.slides = [slide, Slide()]
 
         let url = FileManager.default.temporaryDirectory
@@ -44,6 +46,7 @@ final class DeckTests: XCTestCase {
         let exportedSlide = try unzip(url, "ppt/slides/slide1.xml")
         XCTAssertTrue(exportedSlide.contains("礼乐 &amp; 政治 &lt;原文&gt;"))
         XCTAssertTrue(exportedSlide.contains("<p:pic>"))
+        XCTAssertTrue(exportedSlide.contains("l=\"12500\" t=\"10000\" r=\"2500\" b=\"15000\""))
         let notes = try unzip(url, "ppt/notesSlides/notesSlide1.xml")
         XCTAssertTrue(notes.contains("第二段讲稿"))
         XCTAssertTrue(notes.contains("<p:ph type=\"body\""))
@@ -56,6 +59,7 @@ final class DeckTests: XCTestCase {
         XCTAssertEqual(imported.deck.slides.first?.objects.first?.text, "礼乐 & 政治 <原文>")
         XCTAssertEqual(imported.deck.slides.first?.speakerNotes, slide.speakerNotes)
         XCTAssertEqual(imported.deck.images.values.first, deck.images[imageID])
+        XCTAssertEqual(imported.deck.slides.first?.objects.last?.pictureCrop, crop)
         XCTAssertEqual(imported.deck.slides.flatMap { $0.importReport?.diagnostics ?? [] }, [])
 
     }

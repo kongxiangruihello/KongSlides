@@ -1,60 +1,58 @@
 import AppKit
 import SwiftUI
 
+struct PresentationDisplays: Equatable {
+    let projection: UInt32
+    let console: UInt32?
+
+    static func resolve(_ available: [UInt32], preferProjection: UInt32?, preferConsole: UInt32?) -> Self? {
+        guard let first = available.first else { return nil }
+        if available.count == 1 { return Self(projection: first, console: nil) }
+        let teacher = available.first { $0 == preferConsole }
+            ?? available.first { $0 != preferProjection } ?? first
+        let audience = available.first { $0 != teacher && $0 == preferProjection }
+            ?? available.first { $0 != teacher } ?? first
+        return Self(projection: audience, console: teacher)
+    }
+}
+
 final class PresentationController: NSObject, ObservableObject, NSWindowDelegate {
     @Published private(set) var deck = Deck()
     @Published private(set) var index = 0
     @Published private(set) var started = Date()
+    @Published private(set) var dualScreen = false
+    @Published var showSingleScreenControls = true
 
     private var projection: NSWindow?
     private var console: NSWindow?
     private var keyboardMonitor: Any?
+    private var preferredProjection: UInt32?
+    private var preferredConsole: UInt32?
+    private var active = false
 
     func start(deck: Deck, at index: Int) {
-        if projection != nil { stop() }
+        stop()
         self.deck = deck
-        self.index = index
+        go(to: index)
         started = Date()
-
-        guard let primary = NSApp.keyWindow?.screen ?? NSScreen.main else { return }
-        let external = NSScreen.screens.first { $0 != primary }
-        let target = external ?? primary
-
-        let projection = ProjectionWindow(contentRect: target.frame, styleMask: [.borderless],
-                                          backing: .buffered, defer: false, screen: target)
-        projection.contentViewController = NSHostingController(rootView: ProjectionView(session: self))
-        projection.isReleasedWhenClosed = false
-        projection.backgroundColor = .black
-        projection.level = .floating
-        projection.delegate = self
-        projection.setFrame(target.frame, display: true)
-        self.projection = projection
-        projection.makeKeyAndOrderFront(nil)
-
-        if external != nil {
-            let area = primary.visibleFrame
-            let rect = area.insetBy(dx: min(36, area.width * 0.03), dy: min(36, area.height * 0.03))
-            let console = NSWindow(contentRect: rect, styleMask: [.titled, .closable, .resizable],
-                                   backing: .buffered, defer: false, screen: primary)
-            console.contentViewController = NSHostingController(rootView: PresenterView(session: self))
-            console.isReleasedWhenClosed = false
-            console.title = "KongSlides · 演讲者视图"
-            console.delegate = self
-            console.setFrame(rect, display: true)
-            self.console = console
-            console.makeKeyAndOrderFront(nil)
-        }
+        active = true
+        showSingleScreenControls = true
+        preferredConsole = (NSApp.keyWindow?.screen ?? NSScreen.main)?.displayID
+        preferredProjection = NSScreen.screens.first { $0.displayID != preferredConsole }?.displayID
+        configureDisplays()
 
         keyboardMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self, let window = event.window,
                   window === self.projection || window === self.console else { return event }
             guard event.modifierFlags.intersection([.command, .control, .option]).isEmpty else { return event }
+            if event.keyCode == 53 { self.stop(); return nil }
+            if window.firstResponder is NSTextView { return event }
             switch event.keyCode {
-            case 53: self.stop()
             case 123, 126, 116: self.step(-1)
             case 124, 125, 121, 49: self.step(1)
             case 115: self.go(to: 0)
             case 119: self.go(to: self.deck.slides.count - 1)
+            case 8: if !self.dualScreen { self.showSingleScreenControls.toggle() }
             default: return event
             }
             return nil
@@ -69,13 +67,23 @@ final class PresentationController: NSObject, ObservableObject, NSWindowDelegate
         index = min(max(position, 0), deck.slides.count - 1)
     }
 
+    func swapScreens() {
+        guard dualScreen, let projectionScreen = projection?.screen?.displayID,
+              let consoleScreen = console?.screen?.displayID, projectionScreen != consoleScreen else { return }
+        preferredProjection = consoleScreen
+        preferredConsole = projectionScreen
+        configureDisplays()
+    }
+
     func stop() {
+        active = false
         if let keyboardMonitor { NSEvent.removeMonitor(keyboardMonitor) }
         keyboardMonitor = nil
         NotificationCenter.default.removeObserver(self)
         let windows = [projection, console].compactMap { $0 }
         projection = nil
         console = nil
+        dualScreen = false
         for window in windows {
             window.delegate = nil
             window.orderOut(nil)
@@ -92,14 +100,68 @@ final class PresentationController: NSObject, ObservableObject, NSWindowDelegate
     }
 
     @objc private func displaysChanged(_ notification: Notification) {
-        guard let projection else { return }
-        if let screen = projection.screen, NSScreen.screens.contains(screen),
-           console == nil || screen != console?.screen {
-            projection.setFrame(screen.frame, display: true)
-        } else {
-            stop()
+        if active { configureDisplays() }
+    }
+
+    private func configureDisplays() {
+        // Hide the private window before rearranging either display.
+        console?.orderOut(nil)
+        let screens = NSScreen.screens
+        guard let layout = PresentationDisplays.resolve(screens.compactMap(\.displayID),
+                                                         preferProjection: preferredProjection,
+                                                         preferConsole: preferredConsole),
+              let target = screens.first(where: { $0.displayID == layout.projection }) else {
+            projection?.orderOut(nil)
+            return
+        }
+        let teacher = screens.first { $0.displayID == layout.console }
+        dualScreen = teacher != nil
+        showSingleScreenControls = teacher == nil
+
+        let projection = self.projection ?? makeProjection(on: target)
+        self.projection = projection
+        projection.setFrame(target.frame, display: true)
+        projection.makeKeyAndOrderFront(nil)
+        if let teacher {
+            let area = teacher.visibleFrame
+            let frame = area.insetBy(dx: min(36, area.width * 0.03), dy: min(36, area.height * 0.03))
+            let console = self.console ?? makeConsole(frame: frame, on: teacher)
+            self.console = console
+            console.setFrame(frame, display: true)
+            guard console.screen?.displayID == teacher.displayID,
+                  console.screen?.displayID != projection.screen?.displayID else {
+                dualScreen = false
+                showSingleScreenControls = true
+                return
+            }
+            console.makeKeyAndOrderFront(nil)
         }
     }
+
+    private func makeProjection(on screen: NSScreen) -> NSWindow {
+        let window = ProjectionWindow(contentRect: screen.frame, styleMask: [.borderless],
+                                      backing: .buffered, defer: false, screen: screen)
+        window.contentViewController = NSHostingController(rootView: ProjectionView(session: self))
+        window.isReleasedWhenClosed = false
+        window.backgroundColor = .black
+        window.level = .floating
+        window.delegate = self
+        return window
+    }
+
+    private func makeConsole(frame: CGRect, on screen: NSScreen) -> NSWindow {
+        let window = NSWindow(contentRect: frame, styleMask: [.titled, .closable, .resizable],
+                              backing: .buffered, defer: false, screen: screen)
+        window.contentViewController = NSHostingController(rootView: PresenterView(session: self))
+        window.isReleasedWhenClosed = false
+        window.title = "KongSlides · 演讲者视图"
+        window.delegate = self
+        return window
+    }
+}
+
+private extension NSScreen {
+    var displayID: UInt32? { (deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value }
 }
 
 private final class ProjectionWindow: NSWindow {
@@ -115,6 +177,19 @@ private struct ProjectionView: View {
             SlideSurface(slide: session.deck.slides[session.index], images: session.deck.images)
         }
         .ignoresSafeArea()
+        .overlay(alignment: .bottom) {
+            if !session.dualScreen && session.showSingleScreenControls {
+                HStack(spacing: 14) {
+                    Button("上一页") { session.step(-1) }.disabled(session.index == 0)
+                    Text("\(session.index + 1) / \(session.deck.slides.count)").monospacedDigit()
+                    Button("下一页") { session.step(1) }.disabled(session.index + 1 == session.deck.slides.count)
+                    Button("隐藏控件") { session.showSingleScreenControls = false }.help("按 C 再显示控件")
+                    Button("结束放映", action: session.stop)
+                }
+                .padding(12).background(.regularMaterial, in: .rect(cornerRadius: 12))
+                .padding(.bottom, 22)
+            }
+        }
     }
 }
 
@@ -136,6 +211,7 @@ private struct PresenterView: View {
                     Text(String(format: "%02d:%02d:%02d", elapsed / 3600, (elapsed / 60) % 60, elapsed % 60))
                         .monospacedDigit().font(.title2)
                 }
+                Button("交换屏幕", action: session.swapScreens)
                 Button("结束放映", action: session.stop)
             }
             HStack(alignment: .top, spacing: 16) {

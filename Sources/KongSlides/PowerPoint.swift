@@ -176,9 +176,18 @@ enum PowerPoint {
     }
 
     private static func picture(_ object: SlideObject, id: Int, relationship: Int) -> String {
-        """
+        let crop: String
+        if let area = object.pictureCrop, area.isValid {
+            func percent(_ value: Double) -> Int { Int((value * 100_000).rounded()) }
+            crop = """
+            <a:srcRect l="\(percent(area.left))" t="\(percent(area.top))" r="\(percent(area.right))" b="\(percent(area.bottom))"/>
+            """
+        } else {
+            crop = ""
+        }
+        return """
         <p:pic><p:nvPicPr><p:cNvPr id="\(id)" name="Image \(id)"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr>
-        <p:blipFill><a:blip r:embed="rId\(relationship)"/><a:stretch><a:fillRect/></a:stretch></p:blipFill>
+        <p:blipFill><a:blip r:embed="rId\(relationship)"/>\(crop)<a:stretch><a:fillRect/></a:stretch></p:blipFill>
         <p:spPr>\(geometry(object))</p:spPr></p:pic>
         """
     }

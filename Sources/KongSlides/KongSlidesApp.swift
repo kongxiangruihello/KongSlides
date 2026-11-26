@@ -48,6 +48,14 @@ struct SlideSurface: View {
 struct EditorView: View {
     @Binding var document: SlidesDocument
     @State private var slideID: UUID?
+    @State private var selectedPageIDs: Set<UUID> = []
+    @State private var collapsedSections: Set<UUID> = []
+    @State private var pageCommands = false
+    @State private var pendingDeletion: Set<UUID> = []
+    @State private var notesFocus = false
+    @AppStorage("speakerNotesFontSize") private var notesFontSize = 16.0
+    @State private var notesHeight = 108.0
+    @GestureState private var notesResize = 0.0
     @State private var objectID: UUID?
     @State private var editingID: UUID?
     @State private var linkedError: String?
@@ -64,6 +72,7 @@ struct EditorView: View {
     private var deck: Deck { document.deck }
     private var index: Int { deck.slides.firstIndex { $0.id == slideID } ?? 0 }
     private var slide: Slide { deck.slides[index] }
+    private var selectedPages: Set<UUID> { selectedPageIDs.intersection(deck.slides.map(\.id)) }
     private var selection: Int? { slide.objects.firstIndex { $0.id == objectID } }
 
     var body: some View {
@@ -89,6 +98,19 @@ struct EditorView: View {
             }
         }
         .background(Color(nsColor: .windowBackgroundColor))
+        .background(EditorKeyMonitor(handle: handleShortcut))
+        .sheet(isPresented: $notesFocus, onDismiss: { selectedPageIDs = [slide.id] }) {
+            NotesFocusView(document: $document, slideID: $slideID, fontSize: $notesFontSize)
+        }
+        .alert("删除 \(pendingDeletion.count) 页幻灯片？", isPresented: Binding(
+            get: { !pendingDeletion.isEmpty }, set: { if !$0 { pendingDeletion = [] } }
+        )) {
+            Button("删除", role: .destructive) {
+                deleteSlides(pendingDeletion)
+                pendingDeletion = []
+            }
+            Button("取消", role: .cancel) { pendingDeletion = [] }
+        } message: { Text("所选页面及其讲稿会一起移除。") }
         .onChange(of: slide.id) {
             if selection == nil { objectID = nil }
             editingID = nil
@@ -159,17 +181,31 @@ struct EditorView: View {
                 .textFieldStyle(.roundedBorder)
                 .padding(.horizontal, 12)
             ScrollViewReader { scroll in
-                List(selection: Binding<UUID?>(
-                    get: { slide.id }, set: { if let id = $0, id != slide.id { objectID = nil; slideID = id } }
+                List(selection: Binding<Set<UUID>>(
+                    get: { selectedPages.isEmpty ? [slide.id] : selectedPages },
+                    set: { selection in
+                        pageCommands = true
+                        if self.selectedPages != selection { objectID = nil; editingID = nil }
+                        selectedPageIDs = selection
+                        let added = deck.slides.last { selection.contains($0.id) && $0.id != slide.id }
+                        if selection.count == 1 || !selection.contains(slide.id) {
+                            slideID = added?.id ?? selection.first ?? slide.id
+                        }
+                    }
                 )) {
-                    ForEach(filteredSlides) { row in
+                    ForEach(visibleSlides) { row in
                         slideRow(row).tag(row.id).id(row.id)
                     }
-                    .onMove(perform: search.isEmpty ? reorder : nil)
+                    .onMove(perform: search.isEmpty && collapsedSections.isEmpty ? reorder : nil)
                 }
                 .listStyle(.sidebar)
                 .onChange(of: slide.id) {
-                    if reviewMode != nil { scroll.scrollTo(slide.id, anchor: .center) }
+                    if let range = sectionRange(slide.id) {
+                        if deck.slides[range.lowerBound].id != slide.id {
+                            collapsedSections.remove(deck.slides[range.lowerBound].id)
+                        }
+                    }
+                    scroll.scrollTo(slide.id, anchor: .center)
                 }
             }
         }
@@ -186,11 +222,33 @@ struct EditorView: View {
         }
     }
 
+    private var visibleSlides: [Slide] {
+        guard search.isEmpty, !collapsedSections.isEmpty else { return filteredSlides }
+        var sectionStart: Slide?
+        return deck.slides.filter { row in
+            if row.section != sectionStart?.section || sectionStart == nil { sectionStart = row }
+            return row.id == sectionStart?.id || (sectionStart.map { !collapsedSections.contains($0.id) } ?? true)
+        }
+    }
+
     private func slideRow(_ row: Slide) -> some View {
         VStack(alignment: .leading, spacing: 5) {
             let position = deck.slides.firstIndex { $0.id == row.id } ?? 0
-            if !row.section.isEmpty && (position == 0 || deck.slides[position - 1].section != row.section) {
-                Text(row.section).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+            if !row.section.isEmpty && (!search.isEmpty || position == 0 || deck.slides[position - 1].section != row.section) {
+                if search.isEmpty {
+                    Button {
+                        if collapsedSections.contains(row.id) { collapsedSections.remove(row.id) }
+                        else { collapsedSections.insert(row.id) }
+                        selectedPageIDs = [row.id]
+                        slideID = row.id
+                        pageCommands = true
+                    } label: {
+                        Label(row.section, systemImage: collapsedSections.contains(row.id) ? "chevron.right" : "chevron.down")
+                            .font(.caption.weight(.semibold)).lineLimit(1)
+                    }.buttonStyle(.plain)
+                } else {
+                    Text(row.section).font(.caption.weight(.semibold)).lineLimit(1).foregroundStyle(.secondary)
+                }
             }
             SlideSurface(slide: row, images: deck.images)
                 .clipShape(.rect(cornerRadius: 4))
@@ -203,18 +261,28 @@ struct EditorView: View {
             .font(.caption)
         }
         .padding(.vertical, 6)
+        .simultaneousGesture(TapGesture().onEnded { pageCommands = true })
         .contextMenu {
-            Button("复制此页") { duplicateSlide(row.id) }
+            let pages = selectedPages.contains(row.id) ? selectedPages : [row.id]
+            if pages.count > 1 {
+                Button("复制所选 \(pages.count) 页") { duplicateSlides(pages) }
+                Button("所选页整体上移") { moveSlides(pages, by: -1) }
+                Button("所选页整体下移") { moveSlides(pages, by: 1) }
+                Button("删除所选 \(pages.count) 页", role: .destructive) { pendingDeletion = pages }
+                Divider()
+            }
+            Button("复制此页") { duplicateSlides([row.id]) }
             Button("上移一页") { moveSlide(row.id, delta: -1) }.disabled(row.id == deck.slides.first?.id)
             Button("下移一页") { moveSlide(row.id, delta: 1) }.disabled(row.id == deck.slides.last?.id)
             if !row.section.isEmpty {
                 Divider()
+                Button("重命名整章…") { renameSection(row.id) }
                 Button("上移整章") { moveSection(row.id, delta: -1) }
                     .disabled(adjacentSection(row.id, delta: -1) == nil || !search.isEmpty)
                 Button("下移整章") { moveSection(row.id, delta: 1) }
                     .disabled(adjacentSection(row.id, delta: 1) == nil || !search.isEmpty)
             }
-            Button("删除此页", role: .destructive) { deleteSlide(row.id) }
+            Button("删除此页", role: .destructive) { deleteSlides([row.id]) }
         }
     }
 
@@ -224,12 +292,21 @@ struct EditorView: View {
                                      (geometry.size.height - 48) / Deck.size.height))
             ZStack {
                 Color(nsColor: .underPageBackgroundColor)
-                    .onTapGesture { objectID = nil; editingID = nil }
+                    .onTapGesture { pageCommands = false; objectID = nil; editingID = nil }
                 ZStack(alignment: .topLeading) {
                     SlideSurface(slide: slide, images: deck.images, omittedObject: editingID)
-                        .onTapGesture { objectID = nil; editingID = nil }
+                        .onTapGesture { pageCommands = false; objectID = nil; editingID = nil }
                     ForEach(slide.objects) { object in
                         objectOverlay(object, scale: scale)
+                    }
+                    if let selection, editingID == nil {
+                        let object = slide.objects[selection]
+                        SlideResizeHandles(frame: object.frame, scale: scale, proportional: object.kind == .image) { frame in
+                            changeObjectFrame(object.id, to: frame)
+                        }
+                        .frame(width: Deck.size.width * scale, height: Deck.size.height * scale)
+                        .id(object.id)
+                        .zIndex(2)
                     }
                 }
                 .frame(width: Deck.size.width * scale, height: Deck.size.height * scale)
@@ -261,8 +338,9 @@ struct EditorView: View {
         } else {
             ObjectHitArea(object: object, selected: objectID == object.id, scale: scale,
                           slideBackground: slide.background, images: deck.images,
-                          select: { objectID = object.id },
+                          select: { pageCommands = false; objectID = object.id },
                           edit: {
+                              pageCommands = false
                               objectID = object.id
                               if object.kind == .text { editingID = object.id }
                           },
@@ -280,18 +358,27 @@ struct EditorView: View {
 
     private var notes: some View {
         VStack(alignment: .leading, spacing: 5) {
+            Capsule().fill(.secondary.opacity(0.45)).frame(width: 34, height: 4)
+                .frame(maxWidth: .infinity)
+                .frame(height: 12).contentShape(Rectangle())
+                .gesture(DragGesture(coordinateSpace: .global)
+                    .updating($notesResize) { drag, value, _ in value = -Double(drag.translation.height) }
+                    .onEnded { drag in notesHeight = (notesHeight - Double(drag.translation.height)).clamped(72...260) })
+                .accessibilityHidden(true)
             HStack {
                 Label("逐字讲稿", systemImage: "note.text").font(.headline)
-                Spacer()
                 Text("第 \(index + 1) 页").font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                Stepper("\(Int(notesFontSize)) 磅", value: $notesFontSize, in: 12...36)
+                Button("专注视图") { notesFocus = true }
             }
             TextEditor(text: slideBinding(\.speakerNotes))
-                .font(.body)
+                .font(.system(size: notesFontSize))
                 .scrollContentBackground(.hidden)
-                .frame(height: 108)
+                .frame(height: (notesHeight + notesResize).clamped(72...260))
                 .accessibilityLabel("逐字讲稿")
         }
-        .padding(12)
+        .padding(.horizontal, 12).padding(.bottom, 10)
     }
 
     private var inspector: some View {
@@ -319,7 +406,9 @@ struct EditorView: View {
                             Button("两端对齐") { setAlignment(.justified, for: object.id) }
                         }
                     }
-                    if object.kind != .image {
+                    if object.kind == .image {
+                        cropControls(object)
+                    } else {
                         colorMenu(object.kind == .text ? "文字颜色" : "填充颜色",
                                   selection: objectBinding(object.id, \.color, fallback: Palette.ink),
                                   colors: [("墨黑", Palette.ink), ("靛蓝", Palette.indigo), ("砖红", "A34E42"),
@@ -346,6 +435,7 @@ struct EditorView: View {
                     Text("对象").font(.headline)
                     ForEach(slide.objects.reversed()) { object in
                         Button {
+                            pageCommands = false
                             objectID = object.id
                         } label: {
                             Label(object.label, systemImage: object.kind == .text ? "textformat" :
@@ -363,6 +453,70 @@ struct EditorView: View {
             .padding(14)
         }
         .background(Color(nsColor: .controlBackgroundColor))
+    }
+
+    private func cropControls(_ object: SlideObject) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Menu("图片裁剪") {
+                Button("等比适应图片") { setPictureFit(object, fill: false) }
+                Button("等比填充画框") { setPictureFit(object, fill: true) }
+                Button("重置裁剪") { objectBinding(object.id, \.pictureCrop, fallback: nil).wrappedValue = nil }
+            }
+            Grid(alignment: .leading) {
+                GridRow { cropField("左", object, \.left, opposite: \.right)
+                    cropField("右", object, \.right, opposite: \.left) }
+                GridRow { cropField("上", object, \.top, opposite: \.bottom)
+                    cropField("下", object, \.bottom, opposite: \.top) }
+            }
+        }
+    }
+
+    private func cropField(_ label: String, _ object: SlideObject, _ edge: WritableKeyPath<PictureCrop, Double>,
+                           opposite: KeyPath<PictureCrop, Double>) -> some View {
+        HStack(spacing: 3) {
+            Text(label).foregroundStyle(.secondary)
+            TextField(label, value: Binding(
+                get: { (slide.objects.first { $0.id == object.id }?.pictureCrop ?? .init())[keyPath: edge] },
+                set: { value in
+                    guard let position = slide.objects.firstIndex(where: { $0.id == object.id }) else { return }
+                    var area = slide.objects[position].pictureCrop ?? .init()
+                    area[keyPath: edge] = value.clamped(0...max(0, 0.99 - area[keyPath: opposite]))
+                    document.deck.slides[index].objects[position].pictureCrop = area == .init() ? nil : area
+                }), format: .percent.precision(.fractionLength(0...1)))
+                .labelsHidden().textFieldStyle(.roundedBorder).frame(minWidth: 45)
+        }
+    }
+
+    private func setPictureFit(_ object: SlideObject, fill: Bool) {
+        guard let id = object.imageID, let data = deck.images[id], let image = SlideDrawing.picture(data),
+              let position = slide.objects.firstIndex(where: { $0.id == object.id }) else { return }
+        let size = CGSize(width: CGFloat(image.width), height: CGFloat(image.height))
+        var updated = object
+        if fill {
+            let area = PictureCrop.filling(image: size, frame: object.frame.size)
+            updated.pictureCrop = area == .init() ? nil : area
+        } else {
+            let scale = min(object.width / size.width, object.height / size.height)
+            let width = max(1, size.width * scale)
+            let height = max(1, size.height * scale)
+            updated.x = object.frame.midX - width / 2
+            updated.y = object.frame.midY - height / 2
+            updated.width = width
+            updated.height = height
+            updated.pictureCrop = nil
+        }
+        if updated != object { document.deck.slides[index].objects[position] = updated }
+    }
+
+    private func changeObjectFrame(_ id: UUID, to frame: CGRect) {
+        guard let position = slide.objects.firstIndex(where: { $0.id == id }) else { return }
+        var object = slide.objects[position]
+        guard object.frame != frame else { return }
+        object.x = frame.minX.clamped(-10_000...10_000)
+        object.y = frame.minY.clamped(-10_000...10_000)
+        object.width = frame.width
+        object.height = frame.height
+        document.deck.slides[index].objects[position] = object
     }
 
     private func number(_ label: String, object: SlideObject,
@@ -432,24 +586,133 @@ struct EditorView: View {
         var next = newSlide
         next.section = slide.section
         document.deck.slides.insert(next, at: index + 1)
-        slideID = next.id
+        selectPages([next.id])
     }
 
-    private func duplicateSlide(_ id: UUID) {
-        guard let position = deck.slides.firstIndex(where: { $0.id == id }) else { return }
-        var copy = deck.slides[position]
-        copy.id = UUID()
-        document.deck.slides.insert(copy, at: position + 1)
-        slideID = copy.id
+    private static let pagePasteboard = NSPasteboard.PasteboardType("com.kongslides.clipboard.slides")
+    private static let objectPasteboard = NSPasteboard.PasteboardType("com.kongslides.clipboard.object")
+
+    private func handleShortcut(_ event: NSEvent) -> Bool {
+        let modifiers = event.modifierFlags.intersection([.command, .shift, .option, .control])
+        let pages = selectedPages.isEmpty ? [slide.id] : selectedPages
+        if modifiers.isEmpty, [51, 117].contains(event.keyCode) {
+            if pageCommands { pendingDeletion = pages; return true }
+            if let objectID { removeObject(objectID); return true }
+        }
+        guard modifiers == .command else { return false }
+        switch event.charactersIgnoringModifiers?.lowercased() {
+        case "c":
+            return copySelection(pages)
+        case "v":
+            return pasteSelection()
+        case "d":
+            if pageCommands { duplicateSlides(pages); return true }
+            guard let selection else { return false }
+            let box = SlideClipboard(slides: [Slide(objects: [slide.objects[selection]])], images: deck.images)
+            insert(box, at: index, asObject: true)
+            return true
+        case "a":
+            guard pageCommands else { return false }
+            selectedPageIDs = Set(visibleSlides.map(\.id))
+            return true
+        default:
+            return false
+        }
     }
 
-    private func deleteSlide(_ id: UUID) {
-        guard let position = deck.slides.firstIndex(where: { $0.id == id }) else { return }
+    private func copySelection(_ pages: Set<UUID>) -> Bool {
+        let payload: SlideClipboard
+        let type: NSPasteboard.PasteboardType
+        if pageCommands {
+            payload = SlideClipboard(slides: deck.slides.filter { pages.contains($0.id) }, images: deck.images)
+            type = Self.pagePasteboard
+        } else {
+            guard let selection else { return false }
+            payload = SlideClipboard(slides: [Slide(objects: [slide.objects[selection]])], images: deck.images)
+            type = Self.objectPasteboard
+        }
+        guard let data = try? JSONEncoder().encode(payload) else { return false }
+        NSPasteboard.general.clearContents()
+        return NSPasteboard.general.setData(data, forType: type)
+    }
+
+    private func pasteSelection() -> Bool {
+        let clipboard = NSPasteboard.general
+        let type = pageCommands ? Self.pagePasteboard : Self.objectPasteboard
+        guard let data = clipboard.data(forType: type), data.count <= 192 * 1024 * 1024 else { return false }
+        do {
+            let contents = try JSONDecoder().decode(SlideClipboard.self, from: data).validated()
+            let last = deck.slides.lastIndex { selectedPages.contains($0.id) } ?? index
+            insert(contents, at: pageCommands ? last + 1 : index, asObject: !pageCommands)
+        } catch { linkedError = "剪贴板中的 KongSlides 内容无法读取。" }
+        return true
+    }
+
+    private func insert(_ clipboard: SlideClipboard, at position: Int, asObject: Bool) {
         var updated = deck
-        updated.slides.remove(at: position)
+        let copies = clipboard.copies(into: &updated)
+        if asObject {
+            guard copies.count == 1, var object = copies.first?.objects.first, copies.first?.objects.count == 1 else { return }
+            object.x = (object.x + 12).clamped(-10_000...10_000)
+            object.y = (object.y + 12).clamped(-10_000...10_000)
+            updated.slides[index].objects.append(object)
+            document.deck = updated
+            objectID = object.id
+        } else {
+            updated.slides.insert(contentsOf: copies, at: position)
+            document.deck = updated
+            search = ""
+            selectPages(copies.map(\.id))
+        }
+    }
+
+    private func selectPages(_ ids: [UUID]) {
+        guard let first = ids.first else { return }
+        selectedPageIDs = Set(ids)
+        slideID = first
+        objectID = nil
+        editingID = nil
+        pageCommands = true
+    }
+
+    private func duplicateSlides(_ ids: Set<UUID>) {
+        let pages = deck.slides.filter { ids.contains($0.id) }
+        guard let last = deck.slides.lastIndex(where: { ids.contains($0.id) }) else { return }
+        insert(SlideClipboard(slides: pages, images: deck.images), at: last + 1, asObject: false)
+    }
+
+    private func deleteSlides(_ ids: Set<UUID>) {
+        guard !ids.isEmpty else { return }
+        var updated = deck
+        let current = slide.id
+        updated.slides.removeAll { ids.contains($0.id) }
         if updated.slides.isEmpty { updated.slides = [Slide()] }
-        if slide.id == id { slideID = updated.slides[min(position, updated.slides.count - 1)].id }
+        let next = updated.slides.first { $0.id == current } ?? updated.slides[min(index, updated.slides.count - 1)]
         document.deck = (try? updated.validated()) ?? updated
+        selectPages([next.id])
+    }
+
+    private func moveSlides(_ ids: Set<UUID>, by delta: Int) {
+        var updated = deck
+        updated.moveSelectedSlides(ids, by: delta)
+        if updated.slides != deck.slides { document.deck = updated }
+    }
+
+    private func renameSection(_ id: UUID) {
+        guard let range = sectionRange(id) else { return }
+        let alert = NSAlert()
+        alert.messageText = "重命名章节"
+        let input = NSTextField(string: deck.slides[range.lowerBound].section)
+        input.frame = CGRect(x: 0, y: 0, width: 265, height: 25)
+        alert.accessoryView = input
+        alert.window.initialFirstResponder = input
+        alert.addButton(withTitle: "重命名")
+        alert.addButton(withTitle: "取消")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let name = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        var updated = deck
+        for position in range { updated.slides[position].section = name }
+        document.deck = updated
     }
 
     private func moveSlide(_ id: UUID, delta: Int) {
@@ -469,6 +732,7 @@ struct EditorView: View {
     private func addObject(_ object: SlideObject) {
         document.deck.slides[index].objects.append(object)
         objectID = object.id
+        pageCommands = false
     }
 
     private func changeLayer(_ id: UUID, front: Bool) {
@@ -532,6 +796,7 @@ struct EditorView: View {
             updated.slides[index].objects.append(object)
             document.deck = updated
             objectID = object.id
+            pageCommands = false
         } catch { linkedError = "无法读取这张图片。\n\(error.localizedDescription)" }
     }
 
@@ -560,7 +825,7 @@ struct EditorView: View {
                 updated.images.merge(imported.deck.images, uniquingKeysWith: { current, _ in current })
                 document.deck = updated
                 search = ""
-                slideID = imported.deck.slides.first?.id
+                selectPages(Array(imported.deck.slides.prefix(1).map(\.id)))
 
                 reviewMode = .imported
             } catch {
@@ -581,8 +846,9 @@ struct EditorView: View {
                 guard let target = deck.slides.first(where: { $0.id == row.slideID }) else { return }
                 search = ""
                 editingID = nil
-                slideID = target.id
+                selectPages([target.id])
                 objectID = target.objects.first { $0.id == row.objectID }?.id
+                pageCommands = objectID == nil
             }
         )
     }

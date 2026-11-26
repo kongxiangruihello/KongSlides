@@ -126,9 +126,19 @@ extension PowerPoint {
                     object.kind = .image
                     object.imageID = imageIDs[imagePath]
                     if !hasGeometry { note(.geometry, "「\(label)」使用了默认位置。", object: object.id) }
-                    if let crop = element.child("blipFill")?.child("srcRect"),
-                       ["l", "t", "r", "b"].contains(where: { (crop.number($0) ?? 0) != 0 }) {
-                        note(.crop, "「\(label)」已显示原图，源文件的裁剪范围未保留。", object: object.id)
+                    if let crop = element.child("blipFill")?.child("srcRect") {
+                        func edge(_ name: String) -> Double {
+                            if let points = crop.number(name) { return points / 100_000 }
+                            let value = crop.value(name) ?? ""
+                            if value.isEmpty { return 0 }
+                            return value.hasSuffix("%") ? (Double(value.dropLast()) ?? .nan) / 100 : .nan
+                        }
+                        let area = PictureCrop(left: edge("l"), top: edge("t"), right: edge("r"), bottom: edge("b"))
+                        if area.isValid {
+                            if area != PictureCrop() { object.pictureCrop = area }
+                        } else {
+                            note(.crop, "「\(label)」的留白或特殊裁剪未保留，已显示原图。", object: object.id)
+                        }
                     }
                     slide.objects.append(object)
                     continue

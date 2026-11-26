@@ -46,11 +46,11 @@ enum SlideDrawing {
                 context.setFillColor(Palette.color(object.color).cgColor)
                 context.fill(rect)
             case .image:
-                guard let id = object.imageID, let data = images[id],
-                      let provider = CGDataProvider(data: data as CFData),
-                      let image = CGImage(pngDataProviderSource: provider, decode: nil,
-                                          shouldInterpolate: true, intent: .defaultIntent) else { continue }
-                context.draw(image, in: rect)
+                guard let id = object.imageID, let data = images[id], let image = picture(data) else { continue }
+                context.saveGState()
+                context.clip(to: rect)
+                context.draw(image, in: object.pictureCrop?.imageRect(inside: rect) ?? rect)
+                context.restoreGState()
             case .text:
                 let frame = SlideText.frame(object, in: rect)
                 context.saveGState()
@@ -61,6 +61,11 @@ enum SlideDrawing {
                 context.restoreGState()
             }
         }
+    }
+
+    static func picture(_ data: Data) -> CGImage? {
+        guard let provider = CGDataProvider(data: data as CFData) else { return nil }
+        return CGImage(pngDataProviderSource: provider, decode: nil, shouldInterpolate: true, intent: .defaultIntent)
     }
 
     static func pdf(_ deck: Deck, to url: URL) throws {

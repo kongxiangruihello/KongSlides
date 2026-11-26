@@ -103,6 +103,7 @@ struct SlideObject: Codable, Identifiable, Equatable {
     var color = Palette.ink
     var imageID: UUID?
     var textLayout: SlideTextLayout?
+    var pictureCrop: PictureCrop?
 
     var frame: CGRect { CGRect(x: x, y: y, width: width, height: height) }
 
@@ -189,7 +190,7 @@ struct Deck: Codable, Equatable {
             for object in slide.objects {
                 guard abs(object.x) <= 10_000, abs(object.y) <= 10_000,
                       (1...10_000).contains(object.width), (1...10_000).contains(object.height),
-                      (8...200).contains(object.fontSize), object.textLayout?.isValid != false else {
+                      (8...200).contains(object.fontSize), object.textLayout?.isValid != false, object.pictureCrop?.isValid != false else {
                     throw CocoaError(.fileReadCorruptFile)
                 }
                 if object.kind == .image {

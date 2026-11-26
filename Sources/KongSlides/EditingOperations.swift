@@ -1,0 +1,107 @@
+import Foundation
+
+struct PictureCrop: Codable, Equatable {
+    var left = 0.0
+    var top = 0.0
+    var right = 0.0
+    var bottom = 0.0
+
+    var isValid: Bool {
+        [left, top, right, bottom].allSatisfy { (0...0.99).contains($0) } &&
+            left + right <= 0.99 && top + bottom <= 0.99
+    }
+
+    static func filling(image: CGSize, frame: CGSize) -> Self {
+        let imageRatio = image.width / image.height
+        let frameRatio = frame.width / frame.height
+        if imageRatio > frameRatio {
+            let edge = min(0.495, (1 - frameRatio / imageRatio) / 2)
+            return Self(left: edge, right: edge)
+        }
+        let edge = min(0.495, (1 - imageRatio / frameRatio) / 2)
+        return Self(top: edge, bottom: edge)
+    }
+
+    func imageRect(inside frame: CGRect) -> CGRect {
+        let width = frame.width / (1 - left - right)
+        let height = frame.height / (1 - top - bottom)
+        return CGRect(x: frame.minX - left * width, y: frame.minY - bottom * height,
+                      width: width, height: height)
+    }
+}
+
+enum ResizeCorner: CaseIterable, Hashable {
+    case topLeft, topRight, bottomLeft, bottomRight
+
+    var left: Bool { self == .topLeft || self == .bottomLeft }
+    var top: Bool { self == .topLeft || self == .topRight }
+
+    func resized(_ frame: CGRect, translation: CGSize, proportional: Bool) -> CGRect {
+        let deltaX = translation.width * (left ? -1 : 1)
+        let deltaY = translation.height * (top ? -1 : 1)
+        var width = min(1920, max(min(12, frame.width), frame.width + deltaX))
+        var height = min(1080, max(min(12, frame.height), frame.height + deltaY))
+        if proportional {
+            let xScale = deltaX / frame.width
+            let yScale = deltaY / frame.height
+            let preferred = 1 + (abs(xScale) >= abs(yScale) ? xScale : yScale)
+            let minimum = max(min(12, frame.width) / frame.width, min(12, frame.height) / frame.height)
+            let maximum = max(1, min(1920 / frame.width, 1080 / frame.height))
+            let scale = min(maximum, max(minimum, preferred))
+            width = frame.width * scale
+            height = frame.height * scale
+        }
+        return CGRect(x: left ? frame.maxX - width : frame.minX, y: top ? frame.maxY - height : frame.minY,
+                      width: width, height: height)
+    }
+}
+
+struct SlideClipboard: Codable {
+    var slides: [Slide]
+    var images: [UUID: Data]
+
+    init(slides: [Slide], images: [UUID: Data]) {
+        self.slides = slides
+        let assetIDs = Set(slides.flatMap { $0.objects.compactMap(\.imageID) })
+        self.images = images.filter { assetIDs.contains($0.key) }
+    }
+
+    func validated() throws -> Self {
+        guard !slides.isEmpty, slides.count <= 500 else { throw CocoaError(.fileReadCorruptFile) }
+        let value = try Deck(slides: slides, images: images).validated()
+        return Self(slides: value.slides, images: value.images)
+    }
+
+    func copies(into deck: inout Deck) -> [Slide] {
+        var assetMap: [UUID: UUID] = [:]
+        for (id, data) in images {
+            let target = deck.images[id].map { $0 != data } == true ? UUID() : id
+            assetMap[id] = target
+            deck.images[target] = data
+        }
+        return slides.map { slide in
+            var copy = slide
+            copy.id = UUID()
+            copy.importReport = nil
+            copy.objects = slide.objects.map { object in
+                var result = object
+                result.id = UUID()
+                if let asset = object.imageID { result.imageID = assetMap[asset] ?? asset }
+                return result
+            }
+            return copy
+        }
+    }
+}
+
+extension Deck {
+    mutating func moveSelectedSlides(_ ids: Set<UUID>, by delta: Int) {
+        guard !ids.isEmpty, abs(delta) == 1 else { return }
+        let offsets = slides.indices.filter { ids.contains(slides[$0].id) }
+        guard let first = offsets.first, let last = offsets.last,
+              first + delta >= 0, last + delta < slides.count else { return }
+        for index in delta < 0 ? offsets : Array(offsets.reversed()) {
+            slides.swapAt(index, index + delta)
+        }
+    }
+}
