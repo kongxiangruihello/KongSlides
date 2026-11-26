@@ -74,7 +74,7 @@ wait_for_app() {
 }
 
 upgrade() {
-    local mode="$1" source="$2" target="$3" expected="$4" work pid next
+    local mode="$1" source="$2" target="$3" expected="$4" work pid next updater
     mkdir -p "$(dirname "$source")" "$(dirname "$target")"
     ditto "$root/old/KongSlides.app" "$source"
     echo "Starting desktop check: $mode"
@@ -93,7 +93,11 @@ upgrade() {
     mkdir -m 700 "$work"
     ditto "$root/new/KongSlides.app" "$work/KongSlides.app"
     "$root/probe" verify-target "$source" "$work" "$target" "$expected"
-    "$source/Contents/Helpers/KongSlidesUpdater" "$pid" "$source" "$work" 0.1.4 "$target" "$expected" &
+    updater="$source/Contents/Helpers/KongSlidesUpdater"
+    if [[ "$mode" == alternate ]]; then
+        updater="$root/new/KongSlides.app/Contents/Helpers/KongSlidesUpdater"
+    fi
+    "$updater" "$pid" "$source" "$work" 0.1.4 "$target" "$expected" &
     helper_pid=$!
     "$root/probe" "$source" quit
 

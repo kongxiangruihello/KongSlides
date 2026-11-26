@@ -26,8 +26,8 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
-      SOURCE_COMMIT: dea75eb5c77cc1f011e0e4f20c881a1e33f73986
-      BUILD_RUN: "45815240777"
+      SOURCE_COMMIT: 1c9d822e6345e850c16d2eea3d2a5422ae473c6d
+      BUILD_RUN: "45816567756"
     steps:
       - uses: actions/checkout@v4
       - name: Download the tested build
@@ -48,8 +48,8 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
-      SOURCE_COMMIT: dea75eb5c77cc1f011e0e4f20c881a1e33f73986
-      BUILD_RUN: "45815240777"
+      SOURCE_COMMIT: 1c9d822e6345e850c16d2eea3d2a5422ae473c6d
+      BUILD_RUN: "45816567756"
       EXPECTED_SHA256: ${{ needs.desktop_smoke.outputs.sha256 }}
     steps:
       - name: Verify the macOS build and prepare assets
@@ -72,6 +72,8 @@ jobs:
           - 章节可折叠及重命名。讲稿区可调整大小和字号，并可打开专注视图逐页编辑或连续阅读。
           - 图片可等比适应、填充和手动裁剪。基础裁剪范围可随 PPTX 导入和导出。
           - 演讲者视图可交换屏幕。显示器断开时保留当前页并显示单屏控件，重新接入可恢复双屏。
+
+          - 修复更新到空目录时的路径检查。若旧版的安装位置不可写，可下载本版安装包手动替换一次。
 
           安装包适用于 **Apple 芯片、macOS 15 或更新版本**。可在 KongSlides 菜单中选择“检查更新…”。
           EOF
