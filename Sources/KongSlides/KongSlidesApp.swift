@@ -292,10 +292,10 @@ struct EditorView: View {
                                      (geometry.size.height - 48) / Deck.size.height))
             ZStack {
                 Color(nsColor: .underPageBackgroundColor)
-                    .onTapGesture { pageCommands = false; objectID = nil; editingID = nil }
+                    .onTapGesture { focusCanvas(); objectID = nil; editingID = nil }
                 ZStack(alignment: .topLeading) {
                     SlideSurface(slide: slide, images: deck.images, omittedObject: editingID)
-                        .onTapGesture { pageCommands = false; objectID = nil; editingID = nil }
+                        .onTapGesture { focusCanvas(); objectID = nil; editingID = nil }
                     ForEach(slide.objects) { object in
                         objectOverlay(object, scale: scale)
                     }
@@ -338,9 +338,9 @@ struct EditorView: View {
         } else {
             ObjectHitArea(object: object, selected: objectID == object.id, scale: scale,
                           slideBackground: slide.background, images: deck.images,
-                          select: { pageCommands = false; objectID = object.id },
+                          select: { focusCanvas(); objectID = object.id },
                           edit: {
-                              pageCommands = false
+                              focusCanvas()
                               objectID = object.id
                               if object.kind == .text { editingID = object.id }
                           },
@@ -435,7 +435,7 @@ struct EditorView: View {
                     Text("对象").font(.headline)
                     ForEach(slide.objects.reversed()) { object in
                         Button {
-                            pageCommands = false
+                            focusCanvas()
                             objectID = object.id
                         } label: {
                             Label(object.label, systemImage: object.kind == .text ? "textformat" :
@@ -512,8 +512,8 @@ struct EditorView: View {
         guard let position = slide.objects.firstIndex(where: { $0.id == id }) else { return }
         var object = slide.objects[position]
         guard object.frame != frame else { return }
-        object.x = frame.minX.clamped(-10_000...10_000)
-        object.y = frame.minY.clamped(-10_000...10_000)
+        object.x = Double(frame.minX).clamped(-10_000...10_000)
+        object.y = Double(frame.minY).clamped(-10_000...10_000)
         object.width = frame.width
         object.height = frame.height
         document.deck.slides[index].objects[position] = object
@@ -591,6 +591,13 @@ struct EditorView: View {
 
     private static let pagePasteboard = NSPasteboard.PasteboardType("com.kongslides.clipboard.slides")
     private static let objectPasteboard = NSPasteboard.PasteboardType("com.kongslides.clipboard.object")
+
+    private func focusCanvas() {
+        pageCommands = false
+        if let window = NSApp.keyWindow, window.firstResponder is NSTextView {
+            window.makeFirstResponder(nil)
+        }
+    }
 
     private func handleShortcut(_ event: NSEvent) -> Bool {
         let modifiers = event.modifierFlags.intersection([.command, .shift, .option, .control])

@@ -114,7 +114,7 @@ final class PresentationController: NSObject, ObservableObject, NSWindowDelegate
             projection?.orderOut(nil)
             return
         }
-        let teacher = screens.first { $0.displayID == layout.console }
+        let teacher = layout.console.flatMap { id in screens.first { $0.displayID == id } }
         dualScreen = teacher != nil
         showSingleScreenControls = teacher == nil
 

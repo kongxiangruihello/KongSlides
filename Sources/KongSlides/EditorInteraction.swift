@@ -125,8 +125,7 @@ struct NotesFocusView: View {
                         Text(slide.title).font(.headline)
                         Text(slide.section).foregroundStyle(.secondary)
                     }.frame(width: 250)
-                    TextEditor(text: Binding(get: { slide.speakerNotes },
-                        set: { document.deck.slides[index].speakerNotes = $0 }))
+                    TextEditor(text: notesBinding(for: slide.id))
                         .font(.system(size: fontSize)).id(slide.id)
                         .accessibilityLabel("本页逐字讲稿")
                         .frame(maxHeight: .infinity)
@@ -135,6 +134,15 @@ struct NotesFocusView: View {
         }
         .padding(18)
         .frame(minWidth: 820, minHeight: 560)
+    }
+
+    private func notesBinding(for id: UUID) -> Binding<String> {
+        Binding(get: { document.deck.slides.first { $0.id == id }?.speakerNotes ?? "" },
+                set: { text in
+                    if let position = document.deck.slides.firstIndex(where: { $0.id == id }) {
+                        document.deck.slides[position].speakerNotes = text
+                    }
+                })
     }
 
     private func go(_ delta: Int) {
