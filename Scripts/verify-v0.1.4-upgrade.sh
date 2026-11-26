@@ -31,6 +31,21 @@ cat > "$root/probe.swift" <<'SWIFT'
 import AppKit
 import Foundation
 
+let args = CommandLine.arguments
+if args.count > 2 && args[1] == "verify-target" {
+    let source = URL(fileURLWithPath: args[2], isDirectory: true).standardizedFileURL
+    let work = URL(fileURLWithPath: args[3], isDirectory: true).standardizedFileURL
+    let target = URL(fileURLWithPath: args[4], isDirectory: true).standardizedFileURL
+    let expected = args[5]
+    let prefix = ".KongSlides-update-"
+    print("Arguments:", args.count, "expected version length:", expected.count)
+    print("Same parent:", work.deletingLastPathComponent().path == target.deletingLastPathComponent().path)
+    print("Stage is canonical:", work.resolvingSymlinksInPath().path == work.path)
+    print("Stage UUID:", UUID(uuidString: String(work.lastPathComponent.dropFirst(prefix.count))) != nil)
+    print("Extensions:", source.pathExtension, target.pathExtension, "target component:", target.lastPathComponent)
+    print("Source/destination match:", source.path == target.path)
+    exit(0)
+}
 let url = URL(fileURLWithPath: CommandLine.arguments[1]).resolvingSymlinksInPath().path
 guard let app = NSWorkspace.shared.runningApplications.first(where: {
     $0.bundleIdentifier == "com.kongslides.app" && $0.bundleURL?.resolvingSymlinksInPath().path == url && !$0.isTerminated && $0.isFinishedLaunching
@@ -77,12 +92,20 @@ upgrade() {
     work="$(dirname "$target")/.KongSlides-update-$(uuidgen)"
     mkdir -m 700 "$work"
     ditto "$root/new/KongSlides.app" "$work/KongSlides.app"
+    "$root/probe" verify-target "$source" "$work" "$target" "$expected"
     "$source/Contents/Helpers/KongSlidesUpdater" "$pid" "$source" "$work" 0.1.4 "$target" "$expected" &
     helper_pid=$!
     "$root/probe" "$source" quit
 
     echo "Source accepted quit; waiting for the updater to relaunch the destination."
-    next="$(wait_for_app "$target" "$pid")"
+    if ! next="$(wait_for_app "$target" "$pid")"; then
+        if ! kill -0 "$helper_pid" 2>/dev/null; then
+            status=0
+            wait "$helper_pid" || status=$?
+            echo "Updater exit status: $status"
+        fi
+        return 1
+    fi
     [[ "$next" =~ ^[0-9]+$ && "$next" != "$pid" ]]
     active_app="$target"
     [[ "$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$target/Contents/Info.plist")" == 0.1.4 ]]
