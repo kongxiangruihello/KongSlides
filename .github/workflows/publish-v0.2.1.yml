@@ -11,12 +11,12 @@ permissions:
 
 concurrency:
   group: kongslides-publish-v0.2.1
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   desktop_smoke:
     name: Test upgrades on a macOS desktop
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 7
     permissions:
       actions: read
