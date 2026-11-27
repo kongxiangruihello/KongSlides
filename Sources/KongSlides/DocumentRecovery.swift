@@ -130,6 +130,8 @@ struct RecoveryBrowser: View {
                             Text("\(preview.slides.count) 页 · \(preview.images.count) 张嵌入图片")
                                 .font(.caption).foregroundStyle(.secondary)
                         }.frame(maxWidth: .infinity)
+                    } else if entry != nil && error == nil {
+                        ProgressView("正在读取恢复副本…").frame(maxWidth: .infinity)
                     }
                 }
             }

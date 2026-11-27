@@ -147,6 +147,62 @@ final class EditorWindowTests: XCTestCase {
         XCTAssertFalse(session.hasDocument)
     }
 
+    func testHomeBackupMergesGroupsAndRelocatesFavoritesWithoutLosingOrder() throws {
+        let group = HomeLibrary.Group(name: "论语导读")
+        let old = "/旧目录/第一讲.pptx"
+        let next = "/新目录/第一讲.pptx"
+        let second = "/课件/第二讲.kongslides"
+        var library = HomeLibrary(groups: [group], favorites: [.init(path: old, group: group.id)])
+        library.noteOpened(URL(fileURLWithPath: old))
+        library.lastEdited = old
+        library.previews[old] = .init(title: "第二节", section: "礼", page: 3, pageID: nil, total: 10, backups: 1,
+                                     pendingRepairs: 1, thumbnailPNG: Data([1]), coverPNG: Data([2]), preflightPages: 2)
+        XCTAssertNil(library.portableBackup().previews[old]?.thumbnailPNG)
+        XCTAssertNil(library.portableBackup().previews[old]?.coverPNG)
+        library.relocate(old, to: URL(fileURLWithPath: next))
+        XCTAssertEqual(library.lastEdited, next)
+        XCTAssertEqual(library.favorites.first?.group, group.id)
+        XCTAssertEqual(library.recent, [next])
+        XCTAssertEqual(library.previews[next]?.page, 3)
+        let incoming = HomeLibrary.Group(name: group.name)
+        library.merge(HomeLibrary(groups: [incoming], favorites: [.init(path: second, group: incoming.id)]))
+        XCTAssertEqual(library.groups.count, 1)
+        XCTAssertEqual(library.favorites.last?.group, group.id)
+        library.move(second, before: next)
+        XCTAssertEqual(library.favorites.map(\.path), [second, next])
+    }
+
+    @MainActor
+    func testResumeRecordRestoresSavedPageAndRecentRemovalDoesNotRemoveFavorite() async throws {
+        _ = NSApplication.shared
+        let suite = "kongslides-home-resume-\(UUID())"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".kongslides")
+        defer { try? FileManager.default.removeItem(at: file) }
+        let first = Slide.titleSlide("第一讲", subtitle: "")
+        let second = Slide.titleSlide("第二讲", subtitle: "")
+        try SlidesDocument(deck: Deck(slides: [first, second])).writeNative(to: file)
+        let favorites = FavoriteDocuments(defaults: defaults)
+        let session = EditorFileSession(positions: .init(defaults: defaults), favorites: favorites)
+        session.open(file)
+        try await finishOpening(session)
+        session.rememberPage(second.id, for: session.identity)
+        session.toggleFavorite(file)
+        session.removeRecent(file)
+        XCTAssertTrue(session.isFavorite(file))
+        XCTAssertFalse(session.recentURLs.contains { HomeLibrary.path($0) == HomeLibrary.path(file) })
+        let reopened = EditorFileSession(positions: .init(defaults: defaults), favorites: favorites)
+        XCTAssertEqual(reopened.homeLibrary.previews[HomeLibrary.path(file)]?.page, 2)
+        reopened.open(file)
+        try await finishOpening(reopened)
+        XCTAssertEqual(reopened.activePageID, second.id)
+        reopened.showHome()
+        reopened.requestHomeAction(.preflight)
+        XCTAssertEqual(reopened.screen, .editor)
+        XCTAssertNotNil(reopened.homeAction)
+    }
+
     @MainActor
     private func finishOpening(_ session: EditorFileSession) async throws {
         for _ in 0..<400 where session.opening {

@@ -232,6 +232,15 @@ struct EditorView: View {
         .sheet(isPresented: $pageJumpSheet, onDismiss: applyPageJump) {
             PageJumpView(currentPage: index + 1, pageCount: deck.slides.count) { pendingJump = $0 }
         }
+        .onChange(of: session.homeAction) { _, request in
+            guard session.identity == documentIdentity, let request else { return }
+            session.homeAction = nil
+            switch request.action {
+            case .preflight: runPreflight()
+            case .rehearsal: startRehearsal()
+            case .classroomPackage: exportClassroomPackage()
+            }
+        }
         .sheet(isPresented: $notesFocus, onDismiss: { selectPages([slide.id]) }) {
             NotesFocusView(document: $document, slideID: $slideID, fontSize: $notesFontSize)
         }
@@ -1662,6 +1671,9 @@ struct EditorView: View {
         Task { @MainActor in
             let result = await Task.detached(priority: .userInitiated) { SlideReviewRow.preflight(snapshot) }.value
             preflightRows = result
+            if session.identity == documentIdentity {
+                session.recordPreflight(affectedPages: Set(result.map(\.slideID)).count)
+            }
             preflightPageCount = snapshot.slides.count
             checkingPreflight = false
         }

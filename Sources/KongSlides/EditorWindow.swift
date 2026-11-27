@@ -39,7 +39,8 @@ final class EditorWindow: NSWindowController, NSWindowDelegate, NSMenuDelegate {
         window?.makeKeyAndOrderFront(nil)
     }
 
-    func open(_ url: URL) {
+    func open(_ url: URL, startup: Bool = false) {
+        if startup { _ = session.beginLaunch() }
         showEditor()
         session.open(url)
     }
@@ -105,7 +106,7 @@ final class EditorWindow: NSWindowController, NSWindowDelegate, NSMenuDelegate {
 
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
-        let urls = NSDocumentController.shared.recentDocumentURLs
+        let urls = session.recentURLs
         if urls.isEmpty {
             let empty = NSMenuItem(title: "没有最近使用的课件", action: nil, keyEquivalent: "")
             menu.addItem(empty)
@@ -209,7 +210,7 @@ private struct EditorWindowContent: View {
                     .accessibilityHidden(!editing)
             }
             switch session.screen {
-            case .splash: KongSlidesStartup()
+            case .splash: KongSlidesStartup(session: session)
             case .home: KongSlidesHome(session: session)
             case .editor: EmptyView()
             }

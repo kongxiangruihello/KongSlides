@@ -37,8 +37,9 @@ final class EditorFileSession {
     private(set) var screen: Screen = .home
     private(set) var hasDocument = false
     private(set) var sourceURL: URL?
-    private(set) var favoriteURLs: [URL] = []
-    private(set) var recentURLs: [URL] = []
+    private(set) var homeLibrary = HomeLibrary()
+    var favoriteURLs: [URL] { homeLibrary.favorites.map(\.url) }
+    var recentURLs: [URL] { homeLibrary.recent.map { URL(fileURLWithPath: $0) } }
     private(set) var document = SlidesDocument()
     private(set) var fileURL: URL?
     private(set) var identity = UUID()
@@ -48,6 +49,14 @@ final class EditorFileSession {
     private(set) var progress = ImportProgress()
     var error: String?
     var pageJumpRequest = UUID()
+    enum HomeAction { case preflight, rehearsal, classroomPackage }
+    struct HomeActionRequest: Equatable {
+        let id = UUID()
+        let action: HomeAction
+        static func == (lhs: Self, rhs: Self) -> Bool { lhs.id == rhs.id }
+    }
+    var homeAction: HomeActionRequest?
+    @ObservationIgnored private var storedPreviewTask: Task<Void, Never>?
 
     @ObservationIgnored let undoManager = UndoManager()
     @ObservationIgnored var statusChanged: (() -> Void)?
@@ -62,7 +71,7 @@ final class EditorFileSession {
     init(positions: RecentSlidePositions = .init(), favorites: FavoriteDocuments = .init()) {
         self.positions = positions
         self.favorites = favorites
-        favoriteURLs = favorites.urls
+        homeLibrary = favorites.library
         savedDeck = document.deck
         activePageID = document.deck.slides.first?.id
     }
@@ -77,11 +86,12 @@ final class EditorFileSession {
     }
 
     func finishLaunch() {
-        if screen == .splash { showHome() }
+        if screen == .splash && !opening { showHome() }
     }
 
     func showHome() {
         refreshRecent()
+        if let url = currentDocumentURL { recordWorkplace(url, renderThumbnail: true) }
         screen = .home
         statusChanged?()
     }
@@ -93,32 +103,101 @@ final class EditorFileSession {
     }
 
     func refreshRecent() {
-        var seen = Set<URL>()
-        recentURLs = NSDocumentController.shared.recentDocumentURLs.filter {
-            $0.isFileURL && ["ppt", "pptx", "kongslides"].contains($0.pathExtension.lowercased()) &&
-                seen.insert(FavoriteDocuments.canonical($0)).inserted
+        guard favorites.persisted == nil else { return }
+        let urls = NSDocumentController.shared.recentDocumentURLs.filter {
+            $0.isFileURL && ["ppt", "pptx", "kongslides"].contains($0.pathExtension.lowercased())
         }
+        updateLibrary { library in
+            for url in urls.reversed() { library.noteOpened(url) }
+        }
+    }
+
+    func updateLibrary(_ update: (inout HomeLibrary) -> Void) {
+        var value = homeLibrary
+        update(&value)
+        homeLibrary = value
+        favorites.save(value)
     }
 
     func clearRecent() {
         NSDocumentController.shared.clearRecentDocuments(nil)
-        refreshRecent()
+        updateLibrary { $0.recent = []; $0.prunePreviews() }
+    }
+
+    func removeRecent(_ url: URL) {
+        updateLibrary { $0.recent.removeAll { $0 == HomeLibrary.path(url) }; $0.prunePreviews() }
     }
 
     func isFavorite(_ url: URL) -> Bool {
-        let target = FavoriteDocuments.canonical(url)
-        return favoriteURLs.contains { FavoriteDocuments.canonical($0) == target }
+        homeLibrary.favorites.contains { $0.path == HomeLibrary.path(url) }
     }
 
     func toggleFavorite(_ url: URL) {
+        refreshRecent()
         favorites.toggle(url)
-        favoriteURLs = favorites.urls
+        homeLibrary = favorites.library
+    }
+
+    func requestHomeAction(_ action: HomeAction) {
+        guard hasDocument else { return }
+        continueEditing()
+        homeAction = HomeActionRequest(action: action)
+    }
+
+    func recordPreflight(affectedPages: Int) {
+        guard let url = currentDocumentURL else { return }
+        let path = HomeLibrary.path(url)
+        updateLibrary { $0.previews[path]?.preflightPages = affectedPages }
+    }
+
+    private func recordWorkplace(_ url: URL, renderThumbnail: Bool = false) {
+        let path = HomeLibrary.path(url)
+        let deck = document.deck
+        guard let page = deck.slides.firstIndex(where: { $0.id == activePageID }) else { return }
+        let current = deck.slides[page]
+        let previous = homeLibrary.previews[path]
+        let summary = HomeLibrary.Preview(title: current.title, section: current.section,
+            page: page + 1, pageID: current.id, total: deck.slides.count,
+            backups: deck.slides.count(where: \.isBackup),
+            pendingRepairs: deck.slides.count { slide in
+                slide.importReport?.repair == nil && slide.importReport?.diagnostics.contains { $0.impact == .pageUnavailable } == true
+            }, thumbnailPNG: previous?.pageID == current.id ? previous?.thumbnailPNG : nil,
+            coverPNG: previous?.coverPNG,
+            preflightPages: previous?.preflightPages)
+        if previous != summary || homeLibrary.lastEdited != path {
+            updateLibrary { library in
+                library.lastEdited = path
+                library.previews[path] = summary
+                library.prunePreviews()
+            }
+        }
+        if renderThumbnail {
+            storedPreviewTask?.cancel()
+            let cover = deck.slides[0]
+            let imageIDs = Set((current.objects + cover.objects).compactMap(\.imageID))
+            let images = deck.images.filter { imageIDs.contains($0.key) }
+            let canvas = deck.pageCanvas
+            storedPreviewTask = Task {
+                do { try await Task.sleep(for: .milliseconds(180)) } catch { return }
+                let thumbnails = await Task.detached(priority: .utility) {
+                    let page = HomeThumbnail.render(current, images: images, canvas: canvas)
+                    let first = current.id == cover.id ? page : HomeThumbnail.render(cover, images: images, canvas: canvas)
+                    return (page, first)
+                }.value
+                guard !Task.isCancelled, homeLibrary.previews[path]?.pageID == current.id else { return }
+                updateLibrary {
+                    $0.previews[path]?.thumbnailPNG = thumbnails.0
+                    $0.previews[path]?.coverPNG = thumbnails.1
+                }
+            }
+        }
     }
 
     func rememberPage(_ page: UUID, for editor: UUID) {
         guard editor == identity, document.deck.slides.contains(where: { $0.id == page }) else { return }
         activePageID = page
         if let fileURL { positions.remember(page, for: fileURL) }
+        if let url = currentDocumentURL { recordWorkplace(url, renderThumbnail: true) }
     }
 
     var name: String {
@@ -159,9 +238,9 @@ final class EditorFileSession {
            FavoriteDocuments.canonical(currentDocumentURL) == FavoriteDocuments.canonical(url) {
             cancelOpening()
             continueEditing()
+            updateLibrary { $0.noteOpened(url) }
             return
         }
-        finishLaunch()
         cancelOpening()
         let request = UUID()
         let requestedAt = OpenTiming.now
@@ -204,6 +283,8 @@ final class EditorFileSession {
                                         imagePreparation: opened.imagePreparation, uiInstalledAt: OpenTiming.now)
                 NSDocumentController.shared.noteNewRecentDocumentURL(url)
                 refreshRecent()
+                updateLibrary { $0.noteOpened(url) }
+                recordWorkplace(url, renderThumbnail: true)
             } catch {
                 guard operation == request, !work.isCancelled else { return }
                 self.error = "无法打开「\(url.lastPathComponent)」。\n\(error.localizedDescription)"
@@ -223,10 +304,12 @@ final class EditorFileSession {
     }
 
     func cancelOpening() {
+        let wasOpening = opening
         reader?.cancel()
         reader = nil
         operation = nil
         opening = false
+        if wasOpening && screen == .splash { showHome() }
     }
 
     @discardableResult
@@ -254,8 +337,11 @@ final class EditorFileSession {
         hasDocument = !isClosing
         screen = isClosing ? .home : .editor
         savedStamp = stamp ?? url.flatMap { NativeDocumentStamp(at: $0) }
-        let remembered = url.flatMap { positions.page(for: $0) }
-        activePageID = deck.slides.first(where: { $0.id == remembered })?.id ?? deck.slides.first?.id
+        let preview = (url ?? source).flatMap { homeLibrary.previews[HomeLibrary.path($0)] }
+        let remembered = url.flatMap { positions.page(for: $0) } ?? preview?.pageID
+        let index = max(1, preview?.page ?? 1) - 1
+        let fallback = url == nil && deck.slides.indices.contains(index) ? deck.slides[index].id : deck.slides.first?.id
+        activePageID = deck.slides.first(where: { $0.id == remembered })?.id ?? fallback
         savedDeck = markEdited ? nil : deck
         openTiming = nil
         error = nil
@@ -297,6 +383,8 @@ final class EditorFileSession {
             statusChanged?()
             NSDocumentController.shared.noteNewRecentDocumentURL(destination)
             refreshRecent()
+            updateLibrary { $0.noteOpened(destination) }
+            recordWorkplace(destination, renderThumbnail: true)
             return true
         } catch {
             self.error = "无法保存「\(destination.lastPathComponent)」。\n\(error.localizedDescription)"

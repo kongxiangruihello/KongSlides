@@ -5,11 +5,12 @@ import KongSlidesUpdateSupport
 @MainActor
 final class AppLifecycle: NSObject, NSApplicationDelegate {
     private var timer: Timer?
+    private var didLaunch = false
     private lazy var editor = EditorWindow()
 
     func application(_ application: NSApplication, open urls: [URL]) {
         if let url = urls.first(where: { ["kongslides", "pptx", "ppt"].contains($0.pathExtension.lowercased()) }) {
-            editor.open(url)
+            editor.open(url, startup: !didLaunch)
         }
     }
 
@@ -23,6 +24,7 @@ final class AppLifecycle: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        didLaunch = true
         editor.installMenus()
         editor.launch()
         Task { @MainActor in
