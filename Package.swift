@@ -7,7 +7,8 @@ let package = Package(
     platforms: [.macOS("15.0")],
     targets: [
         .target(name: "KongSlidesUpdateSupport"),
-        .executableTarget(name: "KongSlides", dependencies: ["KongSlidesUpdateSupport"]),
+        .systemLibrary(name: "CZlib"),
+        .executableTarget(name: "KongSlides", dependencies: ["KongSlidesUpdateSupport", "CZlib"]),
         .executableTarget(name: "KongSlidesUpdater", dependencies: ["KongSlidesUpdateSupport"]),
         .testTarget(name: "KongSlidesTests", dependencies: ["KongSlides", "KongSlidesUpdateSupport"])
     ]

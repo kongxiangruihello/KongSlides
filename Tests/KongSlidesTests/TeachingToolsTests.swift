@@ -144,7 +144,9 @@ final class TeachingToolsTests: XCTestCase {
         try SlideDrawing.pdf(exported, to: file)
         let pdf = try XCTUnwrap(CGPDFDocument(file as CFURL))
         var slide = Slide(section: "经学史", speakerNotes: "逐字讲稿", hiddenInShow: true)
-        slide.importReport = SlideImportReport(sourceName: "原稿.pptx", sourcePage: 2, diagnostics: [])
+        slide.importReport = SlideImportReport(sourceName: "原稿.pptx", sourcePage: 2, diagnostics: [
+            ImportDiagnostic(kind: .unsupported, detail: "无法转换源第 2 页", objectID: nil)
+        ])
         let page = try XCTUnwrap(ReferencePDF.pageIndex(for: slide, position: 0, pageCount: pdf.numberOfPages))
         XCTAssertEqual(page, 1)
         let image = try ReferencePDF.image(in: pdf, page: page)
@@ -153,12 +155,17 @@ final class TeachingToolsTests: XCTestCase {
 
         let oldID = slide.id
         let asset = UUID()
-        ReferencePDF.replace(&slide, with: asset, size: CGSize(width: image.width, height: image.height))
+        ReferencePDF.replace(&slide, with: asset, size: CGSize(width: image.width, height: image.height),
+                             repair: .init(pdfName: "参考.pdf", pdfPage: page + 1))
         XCTAssertEqual(slide.id, oldID)
         XCTAssertEqual(slide.speakerNotes, "逐字讲稿")
         XCTAssertEqual(slide.section, "经学史")
         XCTAssertTrue(slide.isBackup)
         XCTAssertEqual(slide.importReport?.sourcePage, 2)
+        XCTAssertEqual(slide.importReport?.diagnostics.first?.impact, .pageUnavailable)
+        let row = try XCTUnwrap(SlideReviewRow.imported(Deck(slides: [slide])).first)
+        XCTAssertEqual(row.repair?.pdfPage, 2)
+        XCTAssertTrue(SlideReviewRow.exportTSV(Deck(slides: [slide])).contains("参考.pdf 第 2 页"))
         XCTAssertEqual(slide.objects.first?.imageID, asset)
         XCTAssertEqual(slide.objects.first?.frame, CGRect(origin: .zero, size: Deck.size))
     }

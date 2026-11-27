@@ -45,7 +45,7 @@ enum TeachingPDF {
         try (output as Data).write(to: url, options: .atomic)
     }
 
-    static func chapterPackage(_ deck: Deck, title: String, in folder: URL) throws -> URL {
+    static func chapterPackage(_ deck: Deck, title: String, in folder: URL, includeEditable: Bool = false) throws -> URL {
         let disallowed = CharacterSet.controlCharacters.union(CharacterSet(charactersIn: "/:"))
         let safeTitle = String(title.components(separatedBy: disallowed).joined(separator: "-").prefix(40))
             .trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: ".")))
@@ -58,6 +58,11 @@ enum TeachingPDF {
                              to: temporary.appendingPathComponent(base + "-投影.pdf"))
         try write(deck, format: .teacher, to: temporary.appendingPathComponent(base + "-教师讲稿.pdf"))
         try write(deck, format: .studentThree, to: temporary.appendingPathComponent(base + "-学生配布稿.pdf"))
+        if includeEditable {
+            try SlidesDocument(deck: deck).writeNative(to: temporary.appendingPathComponent(base + ".kongslides"))
+            try Data(SlideReviewRow.exportTSV(deck).utf8)
+                .write(to: temporary.appendingPathComponent(base + "-导入问题.tsv"), options: .atomic)
+        }
         var number = 1
         while number <= 100 {
             let suffix = number == 1 ? "" : "-\(number)"

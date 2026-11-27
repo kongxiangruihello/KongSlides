@@ -307,6 +307,32 @@ final class DeckTests: XCTestCase {
         XCTAssertEqual(try JSONDecoder().decode([ImportDiagnostic].self, from: encoded), issues)
     }
 
+    func testIndexedImportMatchesSystemReaderForNinetyFourSlides() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".pptx")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let slideCount = 94
+        let deck = Deck(slides: (1...slideCount).map { page in
+            var slide = Slide.titleSlide("第 \(page) 页", subtitle: "中国近现代思想史")
+            slide.speakerNotes = "第 \(page) 页讲稿"
+            return slide
+        })
+        try PowerPoint.write(deck, to: url)
+        XCTAssertNotNil(PowerPointZipIndex(url: url))
+        let clock = ContinuousClock()
+        let oldStart = clock.now
+        let baseline = try PowerPoint.read(url, useIndexedArchive: false, prepareImage: { $0 }).deck
+        let oldTime = clock.now - oldStart
+        let newStart = clock.now
+        let indexed = try PowerPoint.read(url, prepareImage: { $0 }).deck
+        let newTime = clock.now - newStart
+        print("PPTX 94-page benchmark: system \(oldTime), indexed \(newTime)")
+        XCTAssertEqual(indexed.slides.map(\.title), baseline.slides.map(\.title))
+        XCTAssertEqual(indexed.slides.map(\.speakerNotes), baseline.slides.map(\.speakerNotes))
+        XCTAssertEqual(indexed.slides.map { $0.objects.map(\.frame) }, baseline.slides.map { $0.objects.map(\.frame) })
+        XCTAssertEqual(indexed.slides.count, slideCount)
+        XCTAssertLessThan(newTime, oldTime)
+    }
+
     func testPreflightIdentifiesClippingAndPDFUsesSameTextFrame() throws {
         let visible = SlideObject(x: 60, y: 40, width: 340, height: 42, text: "VISIBLE\nHIDDEN", fontSize: 27)
         let clean = SlideObject(x: 60, y: 110, width: 340, height: 95, text: "CLEAN LINE", fontSize: 27)

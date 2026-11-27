@@ -34,9 +34,10 @@ extension PowerPoint {
 
     static func read(_ url: URL, fontAvailable: ((String) -> Bool)? = nil,
                      progress: ((Int, Int) -> Void)? = nil,
+                     useIndexedArchive: Bool = true,
                      prepareImage: (Data) -> Data?) throws -> ImportedDeck {
         try Task.checkCancellation()
-        let archive = try PresentationArchive(url: url)
+        let archive = try PresentationArchive(url: url, useIndexedArchive: useIndexedArchive)
         let presentationPath = try archive.presentationPath()
         let root = try archive.xml(presentationPath)
         guard let size = root.child("sldSz"),
@@ -351,8 +352,9 @@ private final class PresentationArchive {
     private var inheritedParts: [String: XMLElement] = [:]
     private var inheritedRelationships: [String: PartRelationships] = [:]
     private var remaining = 192 * 1024 * 1024
+    private let zip: PowerPointZipIndex?
 
-    init(url: URL) throws {
+    init(url: URL, useIndexedArchive: Bool) throws {
         self.url = url
         if url.pathExtension.lowercased() == "ppt" { throw PowerPointReadError.legacy }
         guard let handle = try? FileHandle(forReadingFrom: url) else { throw PowerPointReadError.unavailable }
@@ -362,6 +364,7 @@ private final class PresentationArchive {
             throw PowerPointReadError.protected
         }
         guard prefix.starts(with: [0x50, 0x4B, 0x03, 0x04]) else { throw PowerPointReadError.package }
+        zip = useIndexedArchive ? PowerPointZipIndex(url: url) : nil
     }
 
     func presentationPath() throws -> String {
@@ -481,6 +484,11 @@ private final class PresentationArchive {
               !path.unicodeScalars.contains(where: forbidden.contains),
               !path.hasPrefix("-") else {
             throw PowerPointReadError.invalidPart(path)
+        }
+        if let zip, zip.supports(path) {
+            let data = try zip.part(path, maximum: min(maximum, remaining), optional: optional)
+            remaining -= data?.count ?? 0
+            return data
         }
         let process = Process()
         let pipe = Pipe()

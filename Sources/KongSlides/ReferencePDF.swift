@@ -49,7 +49,7 @@ enum ReferencePDF {
         return image
     }
 
-    static func replace(_ slide: inout Slide, with asset: UUID, size: CGSize, canvas: SlideCanvas = .widescreen) {
+    static func replace(_ slide: inout Slide, with asset: UUID, size: CGSize, canvas: SlideCanvas = .widescreen, repair: SlideImportReport.Repair? = nil) {
         let frame = canvas.size
         let scale: CGFloat = min(frame.width / size.width, frame.height / size.height)
         let width: Double = Double(size.width * scale)
@@ -57,10 +57,7 @@ enum ReferencePDF {
         slide.background = "FFFFFF"
         slide.objects = [SlideObject(kind: .image, x: (Double(frame.width) - width) / 2,
                                      y: (Double(frame.height) - height) / 2, width: width, height: height, imageID: asset)]
-        if let report = slide.importReport {
-            slide.importReport = SlideImportReport(sourceName: report.sourceName,
-                                                   sourcePage: report.sourcePage, diagnostics: [])
-        }
+        if let repair { slide.importReport?.repair = repair }
     }
 }
 
@@ -76,6 +73,9 @@ struct ReferencePDFView: View {
     @State private var pdfIndex: Int?
     @State private var error: String?
     @State private var confirming = false
+    @State private var overlay = false
+    @State private var opacity = 0.5
+    @State private var overlayImage: CGImage?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -88,23 +88,40 @@ struct ReferencePDFView: View {
                 Text(error).foregroundStyle(.secondary)
             } else if let document, deck.slides.indices.contains(slideIndex) {
                 navigation(document)
-                HStack(spacing: 14) {
-                    VStack(alignment: .leading) {
-                        Text("当前课件　\(deck.slides[slideIndex].title)").font(.headline).lineLimit(1)
+                if overlay, let overlayImage {
+                    ZStack {
                         SlideSurface(slide: deck.slides[slideIndex], images: deck.images, canvas: deck.pageCanvas)
-                            .border(.secondary.opacity(0.25))
-                            .frame(maxHeight: .infinity, alignment: .center)
+                        Image(decorative: overlayImage, scale: 1)
+                            .resizable().scaledToFit().opacity(opacity)
                     }
-                    VStack(alignment: .leading) {
-                        Text(url.lastPathComponent).font(.headline).lineLimit(1)
-                        if let pdfIndex {
-                            ReferencePageView(document: document, index: pdfIndex).id(pdfIndex)
+                    .aspectRatio(deck.pageCanvas.width / deck.pageCanvas.height, contentMode: .fit)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    HStack(spacing: 14) {
+                        VStack(alignment: .leading) {
+                            Text("当前课件　\(deck.slides[slideIndex].title)").font(.headline).lineLimit(1)
+                            SlideSurface(slide: deck.slides[slideIndex], images: deck.images, canvas: deck.pageCanvas)
                                 .border(.secondary.opacity(0.25))
-                        } else {
-                            ContentUnavailableView("没有匹配的参考页", systemImage: "doc.text.magnifyingglass",
-                                                   description: Text("可在上方手动选择 PDF 页码。"))
+                                .frame(maxHeight: .infinity, alignment: .center)
+                        }
+                        VStack(alignment: .leading) {
+                            Text(url.lastPathComponent).font(.headline).lineLimit(1)
+                            if let pdfIndex {
+                                ReferencePageView(document: document, index: pdfIndex).id(pdfIndex)
+                                    .border(.secondary.opacity(0.25))
+                            } else {
+                                ContentUnavailableView("没有匹配的参考页", systemImage: "doc.text.magnifyingglass",
+                                                       description: Text("可在上方手动选择 PDF 页码。"))
+                            }
                         }
                     }
+                }
+                HStack {
+                    Toggle("叠加对照", isOn: $overlay).disabled(pdfIndex == nil)
+                    if overlay {
+                        Slider(value: $opacity, in: 0...1) { Text("参考页不透明度") }.frame(maxWidth: 190)
+                    }
+                    Spacer()
                 }
                 HStack {
                     Text("按源页码配对。PDF 的页序不同时，可手动选择参考页。")
@@ -128,6 +145,16 @@ struct ReferencePDFView: View {
             document = opened
             pairPage()
         }
+        .task(id: overlay ? pdfIndex : nil) {
+            overlayImage = nil
+            guard overlay, let pdfIndex else { return }
+            let url = self.url
+            let image = await Task.detached(priority: .userInitiated) {
+                guard let source = CGPDFDocument(url as CFURL) else { return nil as CGImage? }
+                return try? ReferencePDF.image(in: source, page: pdfIndex)
+            }.value
+            if !Task.isCancelled { overlayImage = image }
+        }
         .alert("用参考 PDF 页面替换当前页？", isPresented: $confirming) {
             Button("替换") {
                 if let pdfIndex, deck.slides.indices.contains(slideIndex) {
@@ -136,7 +163,13 @@ struct ReferencePDFView: View {
                 }
             }
             Button("取消", role: .cancel) {}
-        } message: { Text("页面内容将成为一张图片。讲稿、章节和备用页设置会随该页保留，可用 ⌘Z 撤销。") }
+        } message: {
+            let slide = deck.slides[slideIndex]
+            Text("课件第 \(slideIndex + 1) 页将替换为 PDF 第 \((pdfIndex ?? 0) + 1) 页的图片。"
+                 + (slide.isBackup ? "本页仍为备用页。" : "本页仍参与放映。")
+                 + (slide.speakerNotes.isEmpty ? "" : "本页讲稿会保留。")
+                 + "可用 ⌘Z 撤销。")
+        }
     }
 
     private func navigation(_ doc: PDFDocument) -> some View {

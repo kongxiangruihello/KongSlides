@@ -75,6 +75,8 @@ struct EditorView: View {
     @State private var importTask: Task<PowerPoint.ImportedDeck, Error>?
     @State private var importProgress = ImportProgress()
     @State private var showNotes = true
+    @AppStorage("sidebarWidth") private var sidebarWidth = 206.0
+    @GestureState private var sidebarDrag = 0.0
     @State private var search = ""
     @State private var presenter = PresentationController()
     @FocusState private var canvasTextFocused: Bool
@@ -107,8 +109,15 @@ struct EditorView: View {
             }
             Divider()
             HStack(spacing: 0) {
-                sidebar.frame(width: 206)
-                Divider()
+                sidebar.frame(width: (sidebarWidth + sidebarDrag).clamped(168...360))
+                Rectangle().fill(Color(nsColor: .separatorColor))
+                    .frame(width: 1)
+                    .padding(.horizontal, 3)
+                    .contentShape(Rectangle())
+                    .help("拖动调整缩略图栏宽度")
+                    .gesture(DragGesture(coordinateSpace: .global)
+                        .updating($sidebarDrag) { value, live, _ in live = value.translation.width }
+                        .onEnded { sidebarWidth = (sidebarWidth + $0.translation.width).clamped(168...360) })
                 VStack(spacing: 0) {
                     workspace
                     if showNotes {
@@ -201,7 +210,7 @@ struct EditorView: View {
             }
         }
         .sheet(item: $referencePDF) { reference in
-            ReferencePDFView(url: reference.url, deck: deck, selectedSlide: slide.id, replace: replaceWithReference)
+            ReferencePDFView(url: reference.url, deck: deck, selectedSlide: reference.selectedSlide, replace: replaceWithReference)
         }
         .sheet(item: $teachingSheet) { sheet in
             switch sheet {
@@ -292,6 +301,7 @@ struct EditorView: View {
                 Divider()
                 Button("导出可编辑 PPTX…") { export(.powerPoint) }
                 Button("导出投影 PDF…") { export(.pdf) }
+                Button("导出整份课件的授课资料…") { exportClassroomPackage() }
                 Button("导出本章授课资料…", action: exportChapterPackage)
                     .disabled(slide.section.isEmpty)
                 Menu("导出讲稿与配布 PDF") {
@@ -1194,14 +1204,17 @@ struct EditorView: View {
         }
     }
 
-    private func chooseReferencePDF() {
+    private func chooseReferencePDF() { chooseReferencePDF(for: slide.id) }
+
+    private func chooseReferencePDF(for slideID: UUID) {
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.pdf]
         panel.prompt = "对照"
-        if panel.runModal() == .OK, let url = panel.url { referencePDF = ReferenceFile(url: url) }
+        if panel.runModal() == .OK, let url = panel.url { referencePDF = ReferenceFile(url: url, selectedSlide: slideID) }
     }
 
     private func replaceWithReference(_ slideID: UUID, page: Int, url: URL) {
+        let identity = documentIdentity
         Task { @MainActor in
             do {
                 let rendered = try await Task.detached(priority: .userInitiated) {
@@ -1210,11 +1223,13 @@ struct EditorView: View {
                     guard let data = PhotoStorage.png(image) else { throw ReferencePDFError.invalidPage }
                     return (data, CGSize(width: image.width, height: image.height))
                 }.value
-                guard let index = deck.slides.firstIndex(where: { $0.id == slideID }) else { return }
+                guard session.identity == identity,
+                      let index = deck.slides.firstIndex(where: { $0.id == slideID }) else { return }
                 var updated = deck
                 let asset = UUID()
                 updated.images[asset] = rendered.0
-                ReferencePDF.replace(&updated.slides[index], with: asset, size: rendered.1, canvas: updated.pageCanvas)
+                ReferencePDF.replace(&updated.slides[index], with: asset, size: rendered.1, canvas: updated.pageCanvas,
+                                     repair: .init(pdfName: url.lastPathComponent, pdfPage: page + 1))
                 document.deck = try updated.validated()
                 search = ""
                 selectPages([slideID])
@@ -1230,6 +1245,8 @@ struct EditorView: View {
             checking: mode == .preflight && checkingPreflight,
             refresh: runPreflight,
             compare: chooseReferencePDF,
+            repair: { chooseReferencePDF(for: $0.slideID) },
+            exportReport: exportImportReport,
             fonts: { fontReplacementSheet = true },
             close: { reviewMode = nil },
             reveal: { row in
@@ -1241,6 +1258,15 @@ struct EditorView: View {
                 pageCommands = objectID == nil
             }
         )
+    }
+
+    private func exportImportReport() {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [UTType(filenameExtension: "tsv") ?? .plainText]
+        panel.nameFieldStringValue = "\(session.name)-导入问题.tsv"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do { try Data(SlideReviewRow.exportTSV(deck).utf8).write(to: url, options: .atomic) }
+        catch { linkedError = error.localizedDescription }
     }
 
     private var currentPreflightRows: [SlideReviewRow] {
@@ -1304,7 +1330,10 @@ struct EditorView: View {
 
     private func exportChapterPackage() {
         guard !slide.section.isEmpty, let range = sectionRange(slide.id) else { return }
-        let chapter = slide.section
+        exportClassroomPackage(section: range, chapter: slide.section)
+    }
+
+    private func exportClassroomPackage(section: Range<Int>? = nil, chapter: String? = nil) {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
@@ -1312,16 +1341,16 @@ struct EditorView: View {
         panel.prompt = "导出到此处"
         guard panel.runModal() == .OK, let location = panel.url else { return }
         var snapshot = deck
-        snapshot.slides = Array(snapshot.slides[range])
-        let name = "\(session.name)-\(chapter)"
-        let sectionDeck = snapshot
+        if let section { snapshot.slides = Array(snapshot.slides[section]) }
+        let name = chapter.map { session.name + "-" + $0 } ?? session.name
+        let exportDeck = snapshot
         Task { @MainActor in
             do {
                 let result = try await Task.detached(priority: .userInitiated) {
-                    try TeachingPDF.chapterPackage(sectionDeck, title: name, in: location)
+                    try TeachingPDF.chapterPackage(exportDeck, title: name, in: location, includeEditable: section == nil)
                 }.value
                 NSWorkspace.shared.activateFileViewerSelecting([result])
-            } catch { linkedError = "无法导出本章授课资料。\n\(error.localizedDescription)" }
+            } catch { linkedError = "无法导出授课资料。\n\(error.localizedDescription)" }
         }
     }
 
@@ -1360,6 +1389,7 @@ struct EditorView: View {
 private struct ReferenceFile: Identifiable {
     var id: URL { url }
     let url: URL
+    let selectedSlide: UUID
 }
 
 private enum TeachingSheet: String, Identifiable {

@@ -26,16 +26,33 @@ struct SlideReviewRow: Identifiable {
     let detail: String
     var source: String? = nil
     var impact: ImportDiagnostic.Impact? = nil
+    var repair: SlideImportReport.Repair? = nil
 
     static func imported(_ deck: Deck) -> [Self] {
         let rows = deck.slides.enumerated().flatMap { index, slide -> [Self] in
             guard let report = slide.importReport else { return [] }
             return report.diagnostics.map { issue in
                 Self(slideID: slide.id, objectID: issue.objectID, page: index + 1, title: issue.title,
-                     detail: issue.detail, source: "\(report.sourceName) · 源第 \(report.sourcePage) 页", impact: issue.impact)
+                     detail: issue.detail, source: "\(report.sourceName) · 源第 \(report.sourcePage) 页", impact: issue.impact, repair: report.repair)
             }
         }
         return ImportDiagnostic.Impact.allCases.flatMap { impact in rows.filter { $0.impact == impact } }
+    }
+
+    static func exportTSV(_ deck: Deck) -> String {
+        let header = ["处理状态", "当前页", "源文件及页码", "影响程度", "问题", "详情", "修复来源"]
+        let data = imported(deck).map { row in
+            [row.repair == nil ? "待处理" : "已用 PDF 替换", String(row.page), row.source ?? "",
+             row.impact?.title ?? "", row.title, row.detail,
+             row.repair.map { "\($0.pdfName) 第 \($0.pdfPage) 页" } ?? ""]
+        }
+        return ([header] + data).map { cells in
+            cells.map { cell in
+                let value = cell.components(separatedBy: .newlines.union(.controlCharacters)).joined(separator: " ")
+                let first = value.trimmingCharacters(in: .whitespaces).first
+                return first.map { "=+-@".contains($0) } == true ? "'" + value : value
+            }.joined(separator: "\t")
+        }.joined(separator: "\n") + "\n"
     }
 
     static func preflight(_ deck: Deck) -> [Self] {
@@ -84,14 +101,20 @@ struct SlideReviewPanel: View {
     let checking: Bool
     let refresh: () -> Void
     let compare: () -> Void
+    let repair: (SlideReviewRow) -> Void
+    let exportReport: () -> Void
     let fonts: () -> Void
     let close: () -> Void
     let reveal: (SlideReviewRow) -> Void
 
     @State private var impactFilter: ImportDiagnostic.Impact?
+    @State private var includeProcessed = false
+    private var filteredRows: [SlideReviewRow] {
+        mode == .imported && !includeProcessed ? rows.filter { $0.repair == nil } : rows
+    }
     private var shownRows: [SlideReviewRow] {
-        guard mode == .imported, let impactFilter else { return rows }
-        return rows.filter { $0.impact == impactFilter }
+        guard mode == .imported, let impactFilter else { return filteredRows }
+        return filteredRows.filter { $0.impact == impactFilter }
     }
 
     var body: some View {
@@ -109,6 +132,7 @@ struct SlideReviewPanel: View {
                     Button("重新检查", action: refresh).disabled(checking)
                 } else {
                     Button("对照原稿 PDF…", action: compare)
+                    Button("导出清单…", action: exportReport).disabled(rows.isEmpty)
                 }
                 Button(action: close) { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary) }
                     .buttonStyle(.plain)
@@ -117,55 +141,71 @@ struct SlideReviewPanel: View {
             if mode == .imported {
                 HStack(spacing: 8) {
                     Picker("影响程度", selection: $impactFilter) {
-                        Text("全部（\(rows.count)）").tag(nil as ImportDiagnostic.Impact?)
+                        Text("全部（\(filteredRows.count)）").tag(nil as ImportDiagnostic.Impact?)
                         ForEach(ImportDiagnostic.Impact.allCases) { impact in
-                            let count = rows.count(where: { $0.impact == impact })
+                            let count = filteredRows.count(where: { $0.impact == impact })
                             Text("\(impact.title)（\(count)）").tag(Optional(impact))
                         }
                     }
                     .fixedSize()
-                    Text("严重问题优先，点击条目定位到当前课件的对应页。")
-                        .font(.caption).foregroundStyle(.secondary)
+                    Toggle("显示已处理", isOn: $includeProcessed)
+                    let unavailable = Set(rows.filter { $0.impact == .pageUnavailable && $0.repair == nil }.map(\.slideID)).count
+                    if unavailable > 0 {
+                        Text("\(unavailable) 页待修复")
+                            .font(.caption).foregroundStyle(.secondary)
+                        Button("首个失败页") {
+                            if let first = rows.first(where: { $0.impact == .pageUnavailable && $0.repair == nil }) { reveal(first) }
+                        }
+                    }
                     Spacer(minLength: 0)
                 }
             }
             if shownRows.isEmpty {
                 Text(checking ? "正在检查课件…" : mode == .preflight
                      ? "未发现需处理的文字、字体或画布问题。"
-                     : impactFilter == nil ? "导入时未记录需要核对的项目。" : "没有符合筛选条件的条目。")
+                     : rows.isEmpty ? "导入时未记录需要核对的项目。" : "没有符合筛选条件的条目。")
                     .font(.callout).foregroundStyle(.secondary)
                     .frame(maxHeight: .infinity, alignment: .topLeading)
             } else {
                 ScrollView {
                     LazyVStack(spacing: 0) {
                         ForEach(shownRows) { row in
-                            Button { reveal(row) } label: {
-                                HStack(alignment: .top, spacing: 10) {
-                                    Text("第 \(row.page) 页").monospacedDigit()
-                                        .frame(width: 62, alignment: .leading)
-                                        .foregroundStyle(Color.accentColor)
-                                    VStack(alignment: .leading, spacing: 3) {
-                                        HStack(spacing: 8) {
-                                            Text(row.title).fontWeight(.medium)
-                                            if let impact = row.impact {
-                                                Text(impact.title)
-                                                    .font(.caption)
-                                                    .foregroundStyle(impact == .pageUnavailable ? Color.red :
-                                                        impact == .contentMissing ? Color.orange : Color.secondary)
+                            HStack {
+                                Button { reveal(row) } label: {
+                                    HStack(alignment: .top, spacing: 10) {
+                                        Text("第 \(row.page) 页").monospacedDigit()
+                                            .frame(width: 62, alignment: .leading)
+                                            .foregroundStyle(Color.accentColor)
+                                        VStack(alignment: .leading, spacing: 3) {
+                                            HStack(spacing: 8) {
+                                                Text(row.title).fontWeight(.medium)
+                                                if let impact = row.impact {
+                                                    Text(impact.title)
+                                                        .font(.caption)
+                                                        .foregroundStyle(impact == .pageUnavailable ? Color.red :
+                                                            impact == .contentMissing ? Color.orange : Color.secondary)
+                                                }
+                                            }
+                                            Text(row.detail).foregroundStyle(.secondary)
+                                            if let repair = row.repair {
+                                                Text("已用 \(repair.pdfName) 第 \(repair.pdfPage) 页替换")
+                                                    .font(.caption).foregroundStyle(.secondary)
+                                            }
+                                            if let source = row.source {
+                                                Text(source).font(.caption).foregroundStyle(.secondary)
                                             }
                                         }
-                                        Text(row.detail).foregroundStyle(.secondary)
-                                        if let source = row.source {
-                                            Text(source).font(.caption).foregroundStyle(.secondary)
-                                        }
+                                        Spacer()
+                                        Image(systemName: "chevron.right").foregroundStyle(.secondary)
                                     }
-                                    Spacer()
-                                    Image(systemName: "chevron.right").foregroundStyle(.secondary)
+                                    .padding(.vertical, 6)
+                                    .contentShape(Rectangle())
                                 }
-                                .padding(.vertical, 6)
-                                .contentShape(Rectangle())
+                                .buttonStyle(.plain)
+                                if row.impact == .pageUnavailable && row.repair == nil {
+                                    Button("用 PDF 修复…") { repair(row) }
+                                }
                             }
-                            .buttonStyle(.plain)
                             Divider()
                         }
                     }

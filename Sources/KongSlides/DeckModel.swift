@@ -120,9 +120,15 @@ struct ImportDiagnostic: Codable, Equatable {
 }
 
 struct SlideImportReport: Codable, Equatable {
+    struct Repair: Codable, Equatable {
+        let pdfName: String
+        let pdfPage: Int
+    }
+
     let sourceName: String
     let sourcePage: Int
     let diagnostics: [ImportDiagnostic]
+    var repair: Repair? = nil
 }
 
 struct SlideObject: Codable, Identifiable, Equatable {
