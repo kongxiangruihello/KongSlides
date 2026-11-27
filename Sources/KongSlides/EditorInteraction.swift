@@ -150,36 +150,3 @@ struct NotesFocusView: View {
         if document.deck.slides.indices.contains(next) { slideID = document.deck.slides[next].id }
     }
 }
-
-struct ImportedDraftName: NSViewRepresentable {
-    let title: String?
-
-    func makeNSView(context: Context) -> NamingView { NamingView() }
-
-    func updateNSView(_ view: NamingView, context: Context) {
-        view.draftTitle = title
-        view.updateTitle()
-    }
-
-    final class NamingView: NSView {
-        var draftTitle: String?
-        private weak var named: NSDocument?
-
-        override func viewDidMoveToWindow() {
-            super.viewDidMoveToWindow()
-            DispatchQueue.main.async { [weak self] in self?.updateTitle() }
-        }
-
-        func updateTitle() {
-            guard let document = window?.windowController?.document as? NSDocument else { return }
-            if let draftTitle, document.fileURL == nil, named !== document {
-                document.displayName = draftTitle
-                named = document
-            } else if draftTitle == nil, named === document, document.fileURL != nil {
-                // The native document resumes tracking its saved filename.
-                document.setValue(nil, forKey: "displayName")
-                named = nil
-            }
-        }
-    }
-}

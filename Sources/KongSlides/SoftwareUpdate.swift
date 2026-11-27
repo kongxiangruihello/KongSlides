@@ -5,8 +5,26 @@ import KongSlidesUpdateSupport
 @MainActor
 final class AppLifecycle: NSObject, NSApplicationDelegate {
     private var timer: Timer?
+    private lazy var editor = EditorWindow()
+
+    func application(_ application: NSApplication, open urls: [URL]) {
+        if let url = urls.first(where: { ["kongslides", "pptx", "ppt"].contains($0.pathExtension.lowercased()) }) {
+            editor.open(url)
+        }
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
+        if !hasVisibleWindows { editor.showEditor() }
+        return false
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        editor.session.confirmReplacement() ? .terminateNow : .terminateCancel
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        editor.installMenus()
+        editor.showEditor()
         Task { @MainActor in
             try? await Task.sleep(for: .seconds(4))
             await SoftwareUpdate.shared.check(manual: false)

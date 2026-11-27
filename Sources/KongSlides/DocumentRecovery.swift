@@ -96,30 +96,8 @@ final class RecoverySession {
     }
 }
 
-struct RecoveryWindowObserver: NSViewRepresentable {
-    let close: () -> Void
-
-    func makeNSView(context: Context) -> ObserverView { ObserverView() }
-    func updateNSView(_ view: ObserverView, context: Context) { view.close = close }
-
-    final class ObserverView: NSView {
-        var close: (() -> Void)?
-
-        override func viewDidMoveToWindow() {
-            NotificationCenter.default.removeObserver(self)
-            if let window {
-                NotificationCenter.default.addObserver(self, selector: #selector(willClose(_:)),
-                                                       name: NSWindow.willCloseNotification, object: window)
-            }
-        }
-
-        @objc private func willClose(_ note: Notification) { close?() }
-        deinit { NotificationCenter.default.removeObserver(self) }
-    }
-}
-
 struct RecoveryBrowser: View {
-    let open: (Deck, String) -> Void
+    let open: (Deck, String) -> Bool
     @Environment(\.dismiss) private var dismiss
     @State private var entries: [RecoveryEntry] = []
     @State private var selected: UUID?
@@ -160,8 +138,8 @@ struct RecoveryBrowser: View {
                 Button("删除所选恢复副本…", role: .destructive) { remove = true }.disabled(entry == nil)
                 Spacer()
                 Button("关闭") { dismiss() }.keyboardShortcut(.cancelAction)
-                Button("打开为新课件") {
-                    if let entry, let preview { open(preview, entry.name); dismiss() }
+                Button("恢复到当前窗口") {
+                    if let entry, let preview, open(preview, entry.name) { dismiss() }
                 }.disabled(preview == nil).keyboardShortcut(.defaultAction)
             }
         }

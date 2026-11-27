@@ -109,3 +109,42 @@ extension Deck {
         }
     }
 }
+
+struct SidebarPageSelection: Equatable {
+    enum Click {
+        case single, toggle, range, extendRange
+    }
+
+    var current: UUID
+    var selected: Set<UUID>
+    var anchor: UUID
+
+    mutating func click(_ page: UUID, in visible: [UUID], mode: Click) {
+        guard let target = visible.firstIndex(of: page) else { return }
+        switch mode {
+        case .single:
+            current = page
+            selected = [page]
+            anchor = page
+        case .toggle:
+            if selected.contains(page) && selected.count > 1 {
+                selected.remove(page)
+                if current == page {
+                    current = visible.enumerated().filter { selected.contains($0.element) }
+                        .min { abs($0.offset - target) < abs($1.offset - target) }?.element ?? page
+                    if current == page { selected = [page] }
+                }
+            } else {
+                selected.insert(page)
+                current = page
+            }
+            anchor = current
+        case .range, .extendRange:
+            let start = visible.firstIndex(of: anchor) ?? visible.firstIndex(of: current) ?? target
+            let range = Set(visible[min(start, target)...max(start, target)])
+            selected = mode == .extendRange ? selected.union(range) : range
+            current = page
+            anchor = visible[start]
+        }
+    }
+}

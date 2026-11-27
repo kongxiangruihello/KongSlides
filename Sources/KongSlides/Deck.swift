@@ -18,33 +18,17 @@ extension UTType {
     static let kongSlides = UTType(exportedAs: "com.kongslides.deck", conformingTo: .data)
 }
 
-struct SlidesDocument: FileDocument {
-    static let readableContentTypes: [UTType] = [.kongSlides, .slidePowerPoint]
-    static let writableContentTypes: [UTType] = [.kongSlides]
+struct SlidesDocument {
     var deck = Deck()
 
-    init() {}
-    init(deck: Deck) { self.deck = deck }
-    init(configuration: ReadConfiguration) throws {
-        guard let data = configuration.file.regularFileContents else { throw CocoaError(.fileReadCorruptFile) }
-        if configuration.contentType.conforms(to: .slidePowerPoint) {
-            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
-            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
-            defer { try? FileManager.default.removeItem(at: directory) }
-            let name = configuration.file.preferredFilename ?? "PowerPoint.pptx"
-            let filename = URL(fileURLWithPath: name).lastPathComponent
-            let url = directory.appendingPathComponent(filename.isEmpty || [".", ".."].contains(filename) ? "PowerPoint.pptx" : filename)
-            try data.write(to: url)
-            deck = try PowerPoint.readForEditor(url).deck
-        } else {
-            deck = try JSONDecoder().decode(Deck.self, from: data).validated()
-        }
+    static func readNative(_ url: URL) throws -> Self {
+        let data = try Data(contentsOf: url, options: .mappedIfSafe)
+        return Self(deck: try JSONDecoder().decode(Deck.self, from: data).validated())
     }
 
-    func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
-        guard configuration.contentType == .kongSlides else { throw CocoaError(.fileWriteUnsupportedScheme) }
+    func writeNative(to url: URL) throws {
         let data = try JSONEncoder().encode(deck.validated())
-        return FileWrapper(regularFileWithContents: data)
+        try data.write(to: url, options: .atomic)
     }
 }
 

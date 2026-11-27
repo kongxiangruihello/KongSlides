@@ -5,24 +5,14 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 @main
-struct KongSlidesApp: App {
-    @NSApplicationDelegateAdaptor(AppLifecycle.self) private var lifecycle
-    @AppStorage(SoftwareUpdate.automaticKey) private var automaticallyCheck = true
-
-    var body: some Scene {
-        DocumentGroup(newDocument: SlidesDocument()) { file in
-            EditorView(document: file.$document, fileURL: file.fileURL)
-                .frame(minWidth: 1040, minHeight: 660)
-                .tint(Color(nsColor: Palette.color(Palette.indigo)))
-        }
-        .commands {
-            CommandGroup(after: .appInfo) {
-                Button("检查更新…") {
-                    Task { await SoftwareUpdate.shared.check(manual: true) }
-                }
-                Toggle("自动检查更新", isOn: $automaticallyCheck)
-            }
-        }
+struct KongSlidesApp {
+    @MainActor
+    static func main() {
+        let application = NSApplication.shared
+        let lifecycle = AppLifecycle()
+        application.delegate = lifecycle
+        application.setActivationPolicy(.regular)
+        withExtendedLifetime(lifecycle) { application.run() }
     }
 }
 
@@ -49,10 +39,11 @@ struct SlideSurface: View {
 
 struct EditorView: View {
     @Binding var document: SlidesDocument
-    let fileURL: URL?
-    @Environment(\.newDocument) private var newDocument
+    let session: EditorFileSession
     @State private var slideID: UUID?
     @State private var selectedPageIDs: Set<UUID> = []
+    @State private var pageSelectionAnchor: UUID?
+    @State private var pageToReveal: UUID?
     @State private var collapsedSections: Set<UUID> = []
     @State private var pageCommands = false
     @State private var pendingDeletion: Set<UUID> = []
@@ -80,48 +71,34 @@ struct EditorView: View {
     @State private var importing = false
     @State private var importTask: Task<PowerPoint.ImportedDeck, Error>?
     @State private var importProgress = ImportProgress()
-    @State private var convertedNativeOpen = false
     @State private var showNotes = true
     @State private var search = ""
     @State private var presenter = PresentationController()
     @FocusState private var canvasTextFocused: Bool
 
     private var deck: Deck { document.deck }
-    private var documentName: String {
-        fileURL?.deletingPathExtension().lastPathComponent ?? deck.importedTitle ?? deck.slides.first?.title ?? "KongSlides"
-    }
     private var index: Int { deck.slides.firstIndex { $0.id == slideID } ?? 0 }
     private var slide: Slide { deck.slides[index] }
     private var selectedPages: Set<UUID> { selectedPageIDs.intersection(deck.slides.map(\.id)) }
-    private var sourceIsPowerPoint: Bool { fileURL?.pathExtension.lowercased() == "pptx" }
     private var selection: Int? { slide.objects.firstIndex { $0.id == objectID } }
 
     var body: some View {
         VStack(spacing: 0) {
             controls
-            if sourceIsPowerPoint {
+            if importing || session.opening {
+                let progress = session.opening ? session.progress : importProgress
                 HStack {
-                    Text("PowerPoint 导入预览")
-                    Spacer()
-                    Button("转为可编辑课件") {
-                        let fresh = SlidesDocument(deck: deck)
-                        newDocument(fresh)
-                        convertedNativeOpen = true
-                    }.buttonStyle(.borderedProminent)
-                }
-                .padding(10)
-            }
-            if importing {
-                HStack {
-                    if let count = importProgress.total, count > 0 {
-                        ProgressView(value: Double(importProgress.completed), total: Double(count))
-                        Text("\(importProgress.completed) / \(count) 页").monospacedDigit()
+                    if let count = progress.total, count > 0 {
+                        ProgressView(value: Double(progress.completed), total: Double(count))
+                        Text("\(progress.completed) / \(count) 页").monospacedDigit()
                     } else {
                         ProgressView().controlSize(.small)
-                        Text("正在读取 PPTX…")
+                        Text("正在打开课件…")
                     }
                     Spacer()
-                    Button("取消导入") { importTask?.cancel() }
+                    Button("取消") {
+                        if session.opening { session.cancelOpening() } else { importTask?.cancel() }
+                    }
                 }
                 .padding(.horizontal, 16).padding(.vertical, 8)
             }
@@ -146,40 +123,30 @@ struct EditorView: View {
         }
         .background(Color(nsColor: .windowBackgroundColor))
         .background(EditorKeyMonitor(handle: handleShortcut))
-        .background(ImportedDraftName(title: fileURL == nil ? deck.importedTitle : nil))
         .onAppear {
-            if (fileURL == nil || sourceIsPowerPoint), deck.importedTitle != nil,
-               deck.slides.contains(where: { $0.importReport != nil }) {
+            if deck.importedTitle != nil && deck.slides.contains(where: { $0.importReport != nil }) {
                 reviewMode = .imported
             }
-            if !sourceIsPowerPoint && RecoverySession.shared.shouldOffer() { recoverySheet = true }
+            if RecoverySession.shared.shouldOffer() { recoverySheet = true }
         }
-        .task(id: fileURL) {
-            if sourceIsPowerPoint && !convertedNativeOpen {
-                let fresh = SlidesDocument(deck: deck)
-                convertedNativeOpen = true
-                newDocument(fresh)
-            }
-        }
-        .onDisappear { importTask?.cancel() }
-        .dropDestination(for: URL.self) { urls, _ in
-            guard !importing, urls.count == 1, let url = urls.first,
-                  url.isFileURL, ["pptx", "ppt"].contains(url.pathExtension.lowercased()) else { return false }
-            loadPowerPoint(url, asNewDocument: true)
-            return true
-        }
-        .sheet(isPresented: $notesFocus, onDismiss: { selectedPageIDs = [slide.id] }) {
-            NotesFocusView(document: $document, slideID: $slideID, fontSize: $notesFontSize)
-        }
-        .background(RecoveryWindowObserver {
+        .onDisappear {
+            importTask?.cancel()
             recoveryPending?.cancel()
             RecoverySession.shared.close(recoveryID)
-        })
+        }
+        .dropDestination(for: URL.self) { urls, _ in
+            guard !importing, urls.count == 1, let url = urls.first,
+                  url.isFileURL, ["kongslides", "pptx", "ppt"].contains(url.pathExtension.lowercased()) else { return false }
+            session.open(url)
+            return true
+        }
+        .sheet(isPresented: $notesFocus, onDismiss: { selectPages([slide.id]) }) {
+            NotesFocusView(document: $document, slideID: $slideID, fontSize: $notesFontSize)
+        }
         .onChange(of: deck) { _, latest in
-            guard !sourceIsPowerPoint else { return }
             recoveryPending?.cancel()
             let id = recoveryID
-            let name = documentName
+            let name = session.name
             recoveryPending = Task { @MainActor in
                 do {
                     try await Task.sleep(for: .seconds(1))
@@ -191,8 +158,7 @@ struct EditorView: View {
             RecoveryBrowser { original, name in
                 var copy = original
                 copy.importedTitle = name + "（恢复）"
-                let fresh = SlidesDocument(deck: copy)
-                newDocument(fresh)
+                return session.replace(with: copy, markEdited: true)
             }
         }
         .sheet(isPresented: $canvasSheet) {
@@ -253,10 +219,11 @@ struct EditorView: View {
         .onChange(of: objectID) { if editingID != objectID { editingID = nil } }
         .onChange(of: canvasTextFocused) { if !canvasTextFocused { editingID = nil } }
         .alert("操作未完成", isPresented: Binding(
-            get: { linkedError != nil }, set: { if !$0 { linkedError = nil } }
+            get: { linkedError != nil || session.error != nil },
+            set: { if !$0 { linkedError = nil; session.error = nil } }
         )) {
-            Button("好", role: .cancel) { linkedError = nil }
-        } message: { Text(linkedError ?? "") }
+            Button("好", role: .cancel) { linkedError = nil; session.error = nil }
+        } message: { Text(linkedError ?? session.error ?? "") }
 
     }
 
@@ -300,8 +267,8 @@ struct EditorView: View {
                 showNotes.toggle()
             } label: { Label("讲稿", systemImage: showNotes ? "note.text.badge.minus" : "note.text") }
             Menu {
-                Button("将 PPTX 打开为新课件…") { importPowerPoint(asNewDocument: true) }.disabled(importing)
-                Button("导入 PPTX 到当前课件…") { importPowerPoint(asNewDocument: false) }.disabled(importing)
+                Button("打开课件…") { session.chooseFile() }.disabled(importing || session.opening)
+                Button("追加 PPTX 页面到当前课件…") { importPowerPoint() }.disabled(importing || session.opening)
                 Button("查看 PPTX 导入报告") { reviewMode = .imported }
                     .disabled(!deck.slides.contains { $0.importReport != nil })
                 Button("对照原稿 PDF…", action: chooseReferencePDF)
@@ -351,34 +318,26 @@ struct EditorView: View {
                 .textFieldStyle(.roundedBorder)
                 .padding(.horizontal, 12)
             ScrollViewReader { scroll in
-                List(selection: Binding<Set<UUID>>(
-                    get: { selectedPages.isEmpty ? [slide.id] : selectedPages },
-                    set: { selection in
-                        pageCommands = true
-                        if self.selectedPages != selection { objectID = nil; editingID = nil }
-                        selectedPageIDs = selection
-                        let added = deck.slides.last { selection.contains($0.id) && $0.id != slide.id }
-                        if selection.count == 1 || !selection.contains(slide.id) {
-                            slideID = added?.id ?? selection.first ?? slide.id
-                        }
-                    }
-                )) {
+                List {
                     ForEach(visibleSlides) { row in
-                        slideRow(row).tag(row.id).id(row.id)
+                        slideRow(row).id(row.id)
                     }
                     .onMove(perform: search.isEmpty && collapsedSections.isEmpty ? reorder : nil)
                 }
                 .listStyle(.sidebar)
-                .onChange(of: slide.id) {
-                    if let range = sectionRange(slide.id) {
+                .onChange(of: pageToReveal) { _, target in
+                    guard let target else { return }
+                    if let range = sectionRange(target) {
                         let header = deck.slides[range.lowerBound].id
-                        if header != slide.id, collapsedSections.remove(header) != nil { return }
+                        if header != target, collapsedSections.remove(header) != nil { return }
                     }
-                    scroll.scrollTo(slide.id, anchor: .center)
+                    scroll.scrollTo(target, anchor: .center)
+                    pageToReveal = nil
                 }
                 .onChange(of: collapsedSections) {
-                    if visibleSlides.contains(where: { $0.id == slide.id }) {
-                        scroll.scrollTo(slide.id, anchor: .center)
+                    if let target = pageToReveal {
+                        scroll.scrollTo(target, anchor: .center)
+                        pageToReveal = nil
                     }
                 }
             }
@@ -416,9 +375,7 @@ struct EditorView: View {
                     Button {
                         if collapsedSections.contains(row.id) { collapsedSections.remove(row.id) }
                         else { collapsedSections.insert(row.id) }
-                        selectedPageIDs = [row.id]
-                        slideID = row.id
-                        pageCommands = true
+                        selectPages([row.id], reveal: false)
                     } label: {
                         Label(row.section, systemImage: collapsedSections.contains(row.id) ? "chevron.right" : "chevron.down")
                             .font(.caption.weight(.semibold)).lineLimit(1)
@@ -427,33 +384,34 @@ struct EditorView: View {
                     Text(row.section).font(.caption.weight(.semibold)).lineLimit(1).foregroundStyle(.secondary)
                 }
             }
-            VStack(alignment: .leading, spacing: 5) {
-                SlideSurface(slide: row, images: deck.images, canvas: deck.pageCanvas)
-                    .clipShape(.rect(cornerRadius: 4))
-                    .overlay(RoundedRectangle(cornerRadius: 4).strokeBorder(
-                        row.id == slide.id ? Color.accentColor : .secondary.opacity(0.24),
-                        lineWidth: row.id == slide.id ? 2 : 1))
-                    .accessibilityHidden(true)
-                HStack(spacing: 7) {
-                    Text(String(format: "%02d", position + 1)).monospacedDigit().foregroundStyle(.secondary)
-                    Text(row.title).lineLimit(1)
-                    if row.isBackup {
-                        Image(systemName: "eye.slash").foregroundStyle(.secondary)
-                            .accessibilityLabel("备用页").help("备用页，顺序放映时跳过")
+            Button { chooseSidebarPage(row.id) } label: {
+                VStack(alignment: .leading, spacing: 5) {
+                    SlideSurface(slide: row, images: deck.images, canvas: deck.pageCanvas)
+                        .clipShape(.rect(cornerRadius: 4))
+                        .overlay(RoundedRectangle(cornerRadius: 4).strokeBorder(
+                            row.id == slide.id ? Color.accentColor : .secondary.opacity(0.24),
+                            lineWidth: row.id == slide.id ? 2 : 1))
+                        .accessibilityHidden(true)
+                    HStack(spacing: 7) {
+                        Text(String(format: "%02d", position + 1)).monospacedDigit().foregroundStyle(.secondary)
+                        Text(row.title).lineLimit(1)
+                        if row.isBackup {
+                            Image(systemName: "eye.slash").foregroundStyle(.secondary)
+                                .accessibilityLabel("备用页").help("备用页，顺序放映时跳过")
+                        }
+                        Spacer(minLength: 0)
                     }
-                    Spacer(minLength: 0)
+                    .font(.caption)
                 }
-                .font(.caption)
+                .padding(.vertical, 6)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+                .background(
+                    selectedPages.contains(row.id) || row.id == slide.id ? Color.accentColor.opacity(0.14) : .clear,
+                    in: .rect(cornerRadius: 5)
+                )
             }
-            .padding(.vertical, 6)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .contentShape(Rectangle())
-            .simultaneousGesture(TapGesture().onEnded {
-                pageCommands = true
-                if NSEvent.modifierFlags.intersection([.command, .shift]).isEmpty {
-                    selectPages([row.id])
-                }
-            })
+            .buttonStyle(.plain)
             .accessibilityElement(children: .combine)
             .accessibilityAddTraits(row.id == slide.id ? .isSelected : [])
         }
@@ -997,13 +955,35 @@ struct EditorView: View {
         }
     }
 
-    private func selectPages(_ ids: [UUID]) {
+    private func chooseSidebarPage(_ id: UUID) {
+        let modifiers = NSEvent.modifierFlags
+        let command = modifiers.contains(.command)
+        let shift = modifiers.contains(.shift)
+        let mode: SidebarPageSelection.Click = shift ? (command ? .extendRange : .range) : (command ? .toggle : .single)
+        let visible = visibleSlides.map(\.id)
+        var selection = SidebarPageSelection(current: slide.id,
+                                             selected: selectedPages.isEmpty ? [slide.id] : selectedPages,
+                                             anchor: pageSelectionAnchor ?? slide.id)
+        selection.click(id, in: visible, mode: mode)
+        activatePages(selection, reveal: false)
+    }
+
+    private func selectPages(_ ids: [UUID], reveal: Bool = true) {
         guard let first = ids.first else { return }
-        selectedPageIDs = Set(ids)
-        slideID = first
+        activatePages(SidebarPageSelection(current: first, selected: Set(ids), anchor: first), reveal: reveal)
+    }
+
+    private func activatePages(_ selection: SidebarPageSelection, reveal: Bool) {
+        if let window = NSApp.keyWindow, window.firstResponder is NSTextView {
+            window.makeFirstResponder(nil)
+        }
+        selectedPageIDs = selection.selected
+        pageSelectionAnchor = selection.anchor
+        slideID = selection.current
         objectID = nil
         editingID = nil
         pageCommands = true
+        if reveal { pageToReveal = selection.current }
     }
 
     private func duplicateSlides(_ ids: Set<UUID>) {
@@ -1131,15 +1111,15 @@ struct EditorView: View {
         } catch { linkedError = "无法读取这张图片。\n\(error.localizedDescription)" }
     }
 
-    private func importPowerPoint(asNewDocument: Bool) {
+    private func importPowerPoint() {
         let panel = NSOpenPanel()
         let legacy = UTType(filenameExtension: "ppt")
         panel.allowedContentTypes = [.slidePowerPoint] + [legacy].compactMap { $0 }
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        loadPowerPoint(url, asNewDocument: asNewDocument)
+        loadPowerPoint(url)
     }
 
-    private func loadPowerPoint(_ url: URL, asNewDocument: Bool) {
+    private func loadPowerPoint(_ url: URL) {
         guard !importing else { return }
         importing = true
         let status = ImportProgress()
@@ -1158,11 +1138,6 @@ struct EditorView: View {
             do {
                 let imported = try await task.value
                 guard !task.isCancelled else { return }
-                if asNewDocument {
-                    let fresh = SlidesDocument(deck: imported.deck)
-                    newDocument(fresh)
-                    return
-                }
                 var updated = deck
                 let title = url.deletingPathExtension().lastPathComponent
                 updated.slides.append(contentsOf: imported.deck.fitted(to: deck.pageCanvas).slides.map { original in
@@ -1177,7 +1152,7 @@ struct EditorView: View {
 
                 reviewMode = .imported
             } catch {
-                linkedError = "无法导入这份 PPTX。\n\(error.localizedDescription)"
+                if !task.isCancelled { linkedError = "无法导入这份 PPTX。\n\(error.localizedDescription)" }
             }
         }
     }
@@ -1356,7 +1331,7 @@ private enum TeachingSheet: String, Identifiable {
 }
 
 @Observable
-private final class ImportProgress {
+final class ImportProgress {
     var completed = 0
     var total: Int?
 }
