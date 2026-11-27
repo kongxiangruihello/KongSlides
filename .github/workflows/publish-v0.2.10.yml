@@ -11,7 +11,7 @@ permissions:
 
 concurrency:
   group: kongslides-publish-v0.2.10
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   desktop_smoke:
@@ -26,8 +26,8 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
-      SOURCE_COMMIT: 69196a7693d2721dcf1bb3e3274aec8124b39dbe
-      BUILD_RUN: "45969934205"
+      SOURCE_COMMIT: 64cb4dc3089955f385dd3bbf8909a4bfd1c249c7
+      BUILD_RUN: "45970088420"
     steps:
       - uses: actions/checkout@v4
       - name: Download the tested build
@@ -48,8 +48,8 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
-      SOURCE_COMMIT: 69196a7693d2721dcf1bb3e3274aec8124b39dbe
-      BUILD_RUN: "45969934205"
+      SOURCE_COMMIT: 64cb4dc3089955f385dd3bbf8909a4bfd1c249c7
+      BUILD_RUN: "45970088420"
       EXPECTED_SHA256: ${{ needs.desktop_smoke.outputs.sha256 }}
     steps:
       - name: Verify the macOS build and prepare assets

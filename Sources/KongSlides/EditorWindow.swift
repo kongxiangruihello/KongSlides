@@ -165,8 +165,14 @@ private struct EditorWindowContent: View {
     let session: EditorFileSession
 
     var body: some View {
-        EditorView(document: Binding(get: { session.document }, set: { session.edit($0) }), session: session)
-            .id(session.identity)
+        let identity = session.identity
+        let snapshot = session.document
+        let document = Binding(
+            get: { session.identity == identity ? session.document : snapshot },
+            set: { if session.identity == identity { session.edit($0) } }
+        )
+        EditorView(document: document, session: session)
+            .id(identity)
             .frame(minWidth: 1040, minHeight: 660)
             .tint(Color(nsColor: Palette.color(Palette.indigo)))
     }
