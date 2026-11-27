@@ -44,6 +44,8 @@ struct EditorView: View {
     @State private var selectedPageIDs: Set<UUID> = []
     @State private var pageSelectionAnchor: UUID?
     @State private var pageToReveal: UUID?
+    @State private var pageJumpSheet = false
+    @State private var pendingJump: Int?
     @State private var collapsedSections: Set<UUID> = []
     @State private var pageCommands = false
     @State private var pendingDeletion: Set<UUID> = []
@@ -139,6 +141,10 @@ struct EditorView: View {
                   url.isFileURL, ["kongslides", "pptx", "ppt"].contains(url.pathExtension.lowercased()) else { return false }
             session.open(url)
             return true
+        }
+        .onChange(of: session.pageJumpRequest) { pageJumpSheet = true }
+        .sheet(isPresented: $pageJumpSheet, onDismiss: applyPageJump) {
+            PageJumpView(currentPage: index + 1, pageCount: deck.slides.count) { pendingJump = $0 }
         }
         .sheet(isPresented: $notesFocus, onDismiss: { selectPages([slide.id]) }) {
             NotesFocusView(document: $document, slideID: $slideID, fontSize: $notesFontSize)
@@ -305,7 +311,12 @@ struct EditorView: View {
             HStack {
                 Text("幻灯片").font(.headline)
                 Spacer()
-                Text("\(index + 1) / \(deck.slides.count)").monospacedDigit().foregroundStyle(.secondary)
+                Button { pageJumpSheet = true } label: {
+                    Text("\(index + 1) / \(deck.slides.count)").monospacedDigit()
+                }
+                .buttonStyle(.borderless)
+                .help("前往指定幻灯片（⌘J）")
+                .accessibilityLabel("前往指定幻灯片。当前第 \(index + 1) 页，共 \(deck.slides.count) 页")
                 Button { stepEditorPage(-1) } label: { Image(systemName: "chevron.up") }
                     .buttonStyle(.borderless).disabled(editorPage(-1) == nil)
                     .help("上一页（↑ 或 Page Up）").accessibilityLabel("上一页")
@@ -865,6 +876,17 @@ struct EditorView: View {
         }
     }
 
+    private func applyPageJump() {
+        guard let page = pendingJump else { return }
+        pendingJump = nil
+        guard deck.slides.indices.contains(page - 1) else { return }
+        let id = deck.slides[page - 1].id
+        if !search.isEmpty && !filteredSlides.contains(where: { $0.id == id }) {
+            search = ""
+        }
+        selectPages([id])
+    }
+
     private func editorPage(_ direction: Int) -> UUID? {
         deck.editorPage(after: index, direction: direction,
                         matching: search.isEmpty ? nil : Set(filteredSlides.map(\.id)))
@@ -880,6 +902,11 @@ struct EditorView: View {
             switch event.keyCode {
             case 116, 126: stepEditorPage(-1); return true
             case 121, 125: stepEditorPage(1); return true
+            case 115, 119:
+                let pages = filteredSlides
+                let target = event.keyCode == 115 ? pages.first : pages.last
+                if let target { selectPages([target.id]) }
+                return true
             default: break
             }
         }

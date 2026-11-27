@@ -148,3 +148,13 @@ struct SidebarPageSelection: Equatable {
         }
     }
 }
+
+enum SlidePageNumber {
+    static func parse(_ input: String, pageCount: Int) -> Int? {
+        let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        let digits = trimmed.applyingTransform(.fullwidthToHalfwidth, reverse: false) ?? trimmed
+        guard digits.utf8.allSatisfy({ (48...57).contains($0) }),
+              let page = Int(digits), page >= 1, page <= pageCount else { return nil }
+        return page
+    }
+}

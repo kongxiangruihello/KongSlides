@@ -297,7 +297,7 @@ private struct PresenterView: View {
     }
 
     private func go() {
-        guard let number = Int(jump), (1...session.deck.slides.count).contains(number) else { return }
+        guard let number = SlidePageNumber.parse(jump, pageCount: session.deck.slides.count) else { return }
         session.go(to: number - 1)
         jump = ""
     }

@@ -56,6 +56,11 @@ final class EditorWindow: NSWindowController, NSWindowDelegate, NSMenuDelegate {
         session.chooseFile()
     }
 
+    @objc private func jumpToPage(_ sender: Any?) {
+        showEditor()
+        session.pageJumpRequest = UUID()
+    }
+
     @objc private func save(_ sender: Any?) { session.save() }
     @objc private func saveAs(_ sender: Any?) { session.save(asCopy: true) }
     @objc private func openRecent(_ item: NSMenuItem) {
@@ -152,6 +157,9 @@ final class EditorWindow: NSWindowController, NSWindowDelegate, NSMenuDelegate {
         item(edit, "复制", #selector(NSText.copy(_:)), "c")
         item(edit, "粘贴", #selector(NSText.paste(_:)), "v")
         item(edit, "全选", #selector(NSText.selectAll(_:)), "a")
+
+        let navigation = addMenu("导航")
+        item(navigation, "前往幻灯片…", #selector(jumpToPage(_:)), "j", target: self)
 
         let window = addMenu("窗口")
         item(window, "最小化", #selector(NSWindow.performMiniaturize(_:)), "m")

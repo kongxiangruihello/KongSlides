@@ -2,6 +2,16 @@ import XCTest
 @testable import KongSlides
 
 final class EditingOperationsTests: XCTestCase {
+    func testSlidePageNumberAcceptsFullwidthDigitsAndRejectsOutOfRangeInput() {
+        XCTAssertEqual(SlidePageNumber.parse(" ８８ ", pageCount: 100), 88)
+        XCTAssertEqual(SlidePageNumber.parse("100", pageCount: 100), 100)
+        XCTAssertNil(SlidePageNumber.parse("0", pageCount: 100))
+        XCTAssertNil(SlidePageNumber.parse("101", pageCount: 100))
+        XCTAssertNil(SlidePageNumber.parse("8.5", pageCount: 100))
+        XCTAssertNil(SlidePageNumber.parse("8 8", pageCount: 100))
+        XCTAssertNil(SlidePageNumber.parse("99999999999999999999999", pageCount: 100))
+    }
+
     func testResizeAnchorsOppositeCornerAndKeepsPictureAspect() {
         let frame = CGRect(x: 40, y: 50, width: 160, height: 80)
         let expanded = ResizeCorner.topLeft.resized(frame, translation: CGSize(width: -40, height: -10),

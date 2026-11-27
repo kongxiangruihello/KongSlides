@@ -10,6 +10,7 @@ final class EditorFileSession {
     private(set) var opening = false
     private(set) var progress = ImportProgress()
     var error: String?
+    var pageJumpRequest = UUID()
 
     @ObservationIgnored let undoManager = UndoManager()
     @ObservationIgnored var statusChanged: (() -> Void)?
