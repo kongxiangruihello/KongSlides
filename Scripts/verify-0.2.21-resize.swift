@@ -51,12 +51,19 @@ func event(_ type: CGEventType, _ point: CGPoint) {
 func move(_ identifier: String, by offset: CGFloat) -> CGFloat {
     let start = until("Missing " + identifier) { find(identifier).flatMap(bounds) }
     let center = CGPoint(x: start.midX, y: start.midY)
+    print("Before drag \(identifier): \(start), intended delta \(offset)")
+    if let windows = attribute(app, kAXWindowsAttribute) as? [AXUIElement] {
+        print("Window bounds:", windows.compactMap(bounds))
+    }
     event(.mouseMoved, center)
     event(.leftMouseDown, center)
     for step in 1...8 {
         event(.leftMouseDragged, CGPoint(x: center.x + offset * CGFloat(step) / 8, y: center.y))
     }
     event(.leftMouseUp, CGPoint(x: center.x + offset, y: center.y))
+    Thread.sleep(forTimeInterval: 0.5)
+    print("After drag \(identifier):", find(identifier).flatMap(bounds) as Any)
+    print("Mouse location:", NSEvent.mouseLocation)
     let final = until("Divider did not move by \(offset): \(identifier)") {
         guard let position = find(identifier).flatMap(bounds), abs(position.midX - start.midX - offset) < 5 else { return nil as CGRect? }
         return position

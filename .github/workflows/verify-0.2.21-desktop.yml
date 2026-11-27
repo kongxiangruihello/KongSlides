@@ -40,7 +40,10 @@ jobs:
             sleep 1
           done
           [[ -n "$pid" ]]
-          "$root/resize-test" "$pid"
+          "$root/resize-test" "$pid" || {
+            defaults read com.kongslides.app || true
+            exit 1
+          }
           python3 - <<'PY'
           import subprocess
           for key, expected in [("sidebarWidth", 251), ("inspectorWidth", 270)]:
