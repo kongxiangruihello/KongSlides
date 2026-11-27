@@ -49,6 +49,8 @@ struct EditorView: View {
     @State private var pageJumpSheet = false
     @State private var overviewSheet = false
     @State private var citationSheet = false
+    @State private var rehearsalSheet = false
+    @State private var rehearsedChapters: [ChapterRehearsal] = []
     @State private var pendingJump: Int?
     @State private var collapsedSections: Set<UUID> = []
     @State private var pageCommands = false
@@ -63,11 +65,14 @@ struct EditorView: View {
     @State private var recoveryID = UUID()
     @State private var recoveryPending: Task<Void, Never>?
     @State private var referencePDF: ReferenceFile?
+    @State private var savedSnapshot: DeckSnapshot?
     @ObservedObject private var templateStore = TeachingTemplateStore.shared
     @AppStorage("speakerNotesFontSize") private var notesFontSize = 16.0
     @State private var notesHeight = 108.0
     @GestureState private var notesResize = 0.0
     @State private var objectID: UUID?
+    @State private var additionalObjects = Set<UUID>()
+    @GestureState private var objectMarquee: CGRect?
     @State private var editingID: UUID?
     @State private var linkedError: String?
     @State private var reviewMode: SlideReviewMode?
@@ -88,6 +93,10 @@ struct EditorView: View {
     private var index: Int { deck.slides.firstIndex { $0.id == slideID } ?? 0 }
     private var slide: Slide { deck.slides[index] }
     private var selectedPages: Set<UUID> { selectedPageIDs.intersection(deck.slides.map(\.id)) }
+    private var selectedObjects: Set<UUID> {
+        let valid = Set(slide.objects.filter { !$0.isLocked }.map(\.id))
+        return additionalObjects.union(objectID.map { [$0] } ?? []).intersection(valid)
+    }
     private var selection: Int? { slide.objects.firstIndex { $0.id == objectID } }
 
     var body: some View {
@@ -163,6 +172,21 @@ struct EditorView: View {
             return true
         }
         .onChange(of: session.pageJumpRequest) { pageJumpSheet = true }
+        .sheet(isPresented: $rehearsalSheet) {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("章节排练记录").font(.headline)
+                List(rehearsedChapters) { chapter in
+                    HStack {
+                        Text(chapter.title)
+                        Spacer()
+                        let seconds = Int(chapter.seconds)
+                        Text("实际 \(seconds / 60) 分 \(seconds % 60) 秒")
+                        if let minutes = chapter.plannedMinutes { Text("计划 \(minutes) 分").foregroundStyle(.secondary) }
+                    }
+                }
+                Button("关闭") { rehearsalSheet = false }.keyboardShortcut(.cancelAction)
+            }.padding(18).frame(width: 470, height: 320)
+        }
         .sheet(isPresented: $citationSheet) {
             let page = slide.id
             SlideCitationView(citation: slide.citation ?? .init()) { updated in
@@ -226,6 +250,17 @@ struct EditorView: View {
                 }
             }
         }
+        .sheet(item: $savedSnapshot) { snapshot in
+            DeckSnapshotView(snapshot: snapshot) { selection in
+                do {
+                    let restored = try selection.map { try snapshot.restoring($0, into: deck) } ?? snapshot.deck
+                    let current = restored.slides.first(where: { $0.id == slide.id }) ?? restored.slides.first
+                    document.deck = restored
+                    search = ""
+                    if let current { selectPages([current.id]) }
+                } catch { linkedError = error.localizedDescription }
+            }
+        }
         .sheet(item: $referencePDF) { reference in
             ReferencePDFView(url: reference.url, deck: deck, selectedSlide: reference.selectedSlide, replace: replaceWithReference)
         }
@@ -255,6 +290,7 @@ struct EditorView: View {
         .onChange(of: slide.id) {
             session.rememberPage(slide.id, for: documentIdentity)
             if selection == nil { objectID = nil }
+            additionalObjects.removeAll()
             editingID = nil
         }
         .onChange(of: objectID) { if editingID != objectID { editingID = nil } }
@@ -315,6 +351,9 @@ struct EditorView: View {
                 Button("对照原稿 PDF…", action: chooseReferencePDF)
                 Button("全文替换字体…") { fontReplacementSheet = true }
                 Button("课件恢复…") { recoverySheet = true }
+                Button("保存命名快照…", action: saveDeckSnapshot)
+                Button("打开课件快照…", action: openDeckSnapshot)
+                Button("排练放映并计时…", action: startRehearsal)
                 Divider()
                 Button("导出可编辑 PPTX…") { export(.powerPoint) }
                 Button("导出投影 PDF…") { export(.pdf) }
@@ -500,14 +539,22 @@ struct EditorView: View {
                                      (geometry.size.height - 48) / deck.pageCanvas.height))
             ZStack {
                 Color(nsColor: .underPageBackgroundColor)
-                    .onTapGesture { focusCanvas(); objectID = nil; editingID = nil }
+                    .onTapGesture { clearObjectSelection() }
                 ZStack(alignment: .topLeading) {
                     SlideSurface(slide: slide, images: deck.images, omittedObject: editingID, canvas: deck.pageCanvas)
-                        .onTapGesture { focusCanvas(); objectID = nil; editingID = nil }
+                        .onTapGesture { clearObjectSelection() }
+                        .gesture(objectMarqueeGesture(scale: scale))
                     ForEach(slide.objects.filter { !$0.isLocked }) { object in
                         objectOverlay(object, scale: scale)
                     }
-                    if let selection, editingID == nil, !slide.objects[selection].isLocked {
+                    if let objectMarquee {
+                        Rectangle().fill(Color.accentColor.opacity(0.10))
+                            .overlay(Rectangle().strokeBorder(Color.accentColor, lineWidth: 1))
+                            .frame(width: objectMarquee.width * scale, height: objectMarquee.height * scale)
+                            .position(x: objectMarquee.midX * scale, y: objectMarquee.midY * scale)
+                            .allowsHitTesting(false)
+                    }
+                    if let selection, editingID == nil, selectedObjects.count < 2, !slide.objects[selection].isLocked {
                         let object = slide.objects[selection]
                         SlideResizeHandles(frame: object.frame, scale: scale, proportional: object.kind == .image) { frame in
                             changeObjectFrame(object.id, to: frame)
@@ -524,6 +571,89 @@ struct EditorView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func clearObjectSelection() {
+        focusCanvas()
+        objectID = nil
+        additionalObjects.removeAll()
+        editingID = nil
+    }
+
+    private func chooseObject(_ id: UUID, extend: Bool = NSEvent.modifierFlags.contains(.shift)) {
+        focusCanvas()
+        if extend, let current = objectID, current != id {
+            if additionalObjects.contains(id) { additionalObjects.remove(id) }
+            else { additionalObjects.insert(id) }
+        } else {
+            objectID = id
+            additionalObjects.removeAll()
+        }
+    }
+
+    private func objectMarqueeGesture(scale: CGFloat) -> some Gesture {
+        func rect(_ drag: DragGesture.Value) -> CGRect {
+            CGRect(x: min(drag.startLocation.x, drag.location.x) / scale,
+                   y: min(drag.startLocation.y, drag.location.y) / scale,
+                   width: abs(drag.translation.width) / scale, height: abs(drag.translation.height) / scale)
+        }
+        return DragGesture(minimumDistance: 5, coordinateSpace: .named("slideCanvas"))
+            .updating($objectMarquee) { drag, frame, _ in frame = rect(drag) }
+            .onEnded { drag in
+                let selection = slide.objects.filter { !$0.isLocked && rect(drag).intersects($0.frame) }.map(\.id)
+                clearObjectSelection()
+                objectID = selection.first
+                additionalObjects = Set(selection.dropFirst())
+            }
+    }
+
+    private func moveObjects(dragged id: UUID, by delta: CGSize) {
+        if !selectedObjects.contains(id) { chooseObject(id, extend: false) }
+        let selected = selectedObjects
+        let members = slide.objects.filter { selected.contains($0.id) }
+        guard let left = members.map(\.x).min(), let right = members.map(\.x).max(),
+              let top = members.map(\.y).min(), let bottom = members.map(\.y).max() else { return }
+        let dx = Double(delta.width).clamped((-10_000 - left)...(10_000 - right))
+        let dy = Double(delta.height).clamped((-10_000 - top)...(10_000 - bottom))
+        var updated = slide
+        for index in updated.objects.indices where selected.contains(updated.objects[index].id) {
+            updated.objects[index].x += dx
+            updated.objects[index].y += dy
+        }
+        document.deck.slides[index] = updated
+    }
+
+    private func alignObjects(horizontal: Bool) {
+        let ids = selectedObjects
+        var updated = slide
+        let members = updated.objects.filter { ids.contains($0.id) }
+        let axis = horizontal ? \SlideObject.x : \SlideObject.y
+        guard let edge = members.map({ $0[keyPath: axis] }).min() else { return }
+        for index in updated.objects.indices where ids.contains(updated.objects[index].id) {
+            updated.objects[index][keyPath: axis] = edge
+        }
+        document.deck.slides[index] = updated
+    }
+
+    private func distributeObjects(horizontal: Bool) {
+        let ids = selectedObjects
+        var updated = slide
+        let axis = horizontal ? \SlideObject.x : \SlideObject.y
+        let extent = horizontal ? \SlideObject.width : \SlideObject.height
+        let order = updated.objects.indices.filter { ids.contains(updated.objects[$0].id) }
+            .sorted { updated.objects[$0][keyPath: axis] < updated.objects[$1][keyPath: axis] }
+        guard order.count > 2, let first = order.first, let last = order.last else { return }
+        let start = updated.objects[first][keyPath: axis]
+        let end = updated.objects[last][keyPath: axis] + updated.objects[last][keyPath: extent]
+        let occupied = order.reduce(0.0) { $0 + updated.objects[$1][keyPath: extent] }
+        let gap = (end - start - occupied) / Double(order.count - 1)
+        var position = start
+        for member in order {
+            guard abs(position) <= 10_000 else { return }
+            updated.objects[member][keyPath: axis] = position
+            position += updated.objects[member][keyPath: extent] + gap
+        }
+        document.deck.slides[index] = updated
     }
 
     @ViewBuilder
@@ -544,21 +674,16 @@ struct EditorView: View {
                 .position(x: object.x * scale + width / 2, y: object.y * scale + height / 2)
                 .zIndex(1)
         } else {
-            ObjectHitArea(object: object, selected: objectID == object.id, scale: scale,
+            ObjectHitArea(object: object, selected: objectID == object.id || selectedObjects.contains(object.id), scale: scale,
                           slideBackground: slide.background, images: deck.images, canvas: deck.pageCanvas,
-                          select: { focusCanvas(); objectID = object.id },
+                          select: { chooseObject(object.id) },
                           edit: {
-                              focusCanvas()
-                              objectID = object.id
+                              chooseObject(object.id, extend: false)
                               if object.kind == .text { editingID = object.id }
                               if object.kind == .table { editTable = object }
                           },
                           move: { offset in
-                              guard let i = slide.objects.firstIndex(where: { $0.id == object.id }) else { return }
-                              var updated = slide
-                              updated.objects[i].x = (object.x + offset.width / scale).clamped(-960...960)
-                              updated.objects[i].y = (object.y + offset.height / scale).clamped(-540...540)
-                              document.deck.slides[index] = updated
+                              moveObjects(dragged: object.id, by: CGSize(width: offset.width / scale, height: offset.height / scale))
                           })
                 .frame(width: width, height: height)
                 .position(x: object.x * scale + width / 2, y: object.y * scale + height / 2)
@@ -605,10 +730,20 @@ struct EditorView: View {
                 Toggle("备用页", isOn: Binding(get: { slide.isBackup }, set: { setBackup($0, for: [slide.id]) }))
                     .help("顺序放映时跳过，可在放映中手动调出。")
                 TextField("章节名称", text: slideBinding(\.section))
+                TextField("本章计划（分）", value: chapterMinutes, format: .number)
+                    .help("同名连续页共用计划时长，输入 0 清除。")
                 colorMenu("页背景", selection: slideBinding(\.background),
                           colors: [("米白", Palette.paper), ("纯白", "FFFFFF"), ("深蓝", Palette.ink), ("淡蓝", "EDF2FC")])
                 Divider()
-                if let selection {
+                if selectedObjects.count > 1 {
+                    Text("已选 \(selectedObjects.count) 个对象").font(.headline)
+                    Menu("对齐与分布") {
+                        Button("左对齐") { alignObjects(horizontal: true) }
+                        Button("上对齐") { alignObjects(horizontal: false) }
+                        Button("水平等距") { distributeObjects(horizontal: true) }.disabled(selectedObjects.count < 3)
+                        Button("垂直等距") { distributeObjects(horizontal: false) }.disabled(selectedObjects.count < 3)
+                    }
+                } else if let selection {
                     let object = slide.objects[selection]
                     Text(object.label).font(.headline).lineLimit(2)
                     if let source = object.decorationSource {
@@ -670,8 +805,7 @@ struct EditorView: View {
                     Text("对象").font(.headline)
                     ForEach(slide.objects.reversed()) { object in
                         Button {
-                            focusCanvas()
-                            objectID = object.id
+                            chooseObject(object.id, extend: !object.isLocked && NSEvent.modifierFlags.contains(.shift))
                         } label: {
                             Label(object.label, systemImage: object.isLocked ? "lock" : object.kind == .text ? "textformat" :
                                     object.kind == .image ? "photo" : object.kind == .table ? "tablecells" :
@@ -1074,6 +1208,7 @@ struct EditorView: View {
         slideID = selection.current
         session.rememberPage(selection.current, for: documentIdentity)
         objectID = nil
+        additionalObjects.removeAll()
         editingID = nil
         pageCommands = true
         if reveal { pageToReveal = selection.current }
@@ -1255,6 +1390,56 @@ struct EditorView: View {
             } catch {
                 if !task.isCancelled { linkedError = "无法导入这份 PPTX。\n\(error.localizedDescription)" }
             }
+        }
+    }
+
+    private var chapterMinutes: Binding<Int> {
+        Binding(get: {
+            guard let range = sectionRange(slide.id) else { return 0 }
+            return deck.slides[range.lowerBound].plannedChapterMinutes ?? 0
+        }, set: { value in
+            guard let range = sectionRange(slide.id), (0...600).contains(value) else { return }
+            document.deck.slides[range.lowerBound].plannedChapterMinutes = value == 0 ? nil : value
+        })
+    }
+
+    private func startRehearsal() {
+        if !presenter.start(deck: deck, at: 0, onRehearsalFinished: { chapters in
+            guard session.identity == documentIdentity else { return }
+            rehearsedChapters = chapters
+            rehearsalSheet = true
+        }) {
+            linkedError = "课件中只有备用页。请先将至少一页设为正片。"
+        }
+    }
+
+    private func saveDeckSnapshot() {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.kongSlides]
+        panel.nameFieldStringValue = session.name + "-快照"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        guard url.resolvingSymlinksInPath().standardizedFileURL != session.fileURL?.resolvingSymlinksInPath().standardizedFileURL else {
+            linkedError = "请选择与当前课件不同的快照文件名。"
+            return
+        }
+        let snapshot = document
+        Task {
+            do { try await Task.detached(priority: .userInitiated) { try snapshot.writeNative(to: url) }.value }
+            catch { linkedError = error.localizedDescription }
+        }
+    }
+
+    private func openDeckSnapshot() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.kongSlides]
+        panel.prompt = "预览"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        Task {
+            do {
+                let deck = try await Task.detached(priority: .userInitiated) { try SlidesDocument.readNative(url).deck }.value
+                guard session.identity == documentIdentity else { return }
+                savedSnapshot = DeckSnapshot(url: url, deck: deck)
+            } catch { linkedError = error.localizedDescription }
         }
     }
 
@@ -1537,7 +1722,7 @@ private struct ObjectHitArea: View {
             .onTapGesture(perform: select)
             .gesture(DragGesture(minimumDistance: 4, coordinateSpace: .named("slideCanvas"))
                 .updating($translation) { drag, state, _ in state = drag.translation }
-                .onEnded { drag in select(); move(drag.translation) })
+                .onEnded { drag in move(drag.translation) })
             .offset(translation ?? .zero)
             .accessibilityLabel(object.label)
     }

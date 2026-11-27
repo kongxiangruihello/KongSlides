@@ -16,6 +16,13 @@ struct PresentationDisplays: Equatable {
     }
 }
 
+struct ChapterRehearsal: Identifiable {
+    let id: UUID
+    let title: String
+    let plannedMinutes: Int?
+    var seconds = 0.0
+}
+
 final class PresentationController: NSObject, ObservableObject, NSWindowDelegate {
     @Published private(set) var deck = Deck()
     @Published private(set) var index = 0
@@ -33,13 +40,28 @@ final class PresentationController: NSObject, ObservableObject, NSWindowDelegate
     private var preferredProjection: UInt32?
     private var preferredConsole: UInt32?
     private var active = false
+    private var rehearsalCompletion: (([ChapterRehearsal]) -> Void)?
+    private var rehearsalPages: [Int] = []
+    private var rehearsal: [ChapterRehearsal] = []
+    private var chapterStartedAt = 0.0
 
     @discardableResult
-    func start(deck: Deck, at index: Int) -> Bool {
+    func start(deck: Deck, at index: Int, onRehearsalFinished: (([ChapterRehearsal]) -> Void)? = nil) -> Bool {
         guard let first = deck.firstPresentationIndex(at: index) else { return false }
         stop()
         self.deck = deck
         self.index = first
+        rehearsalCompletion = onRehearsalFinished
+        if onRehearsalFinished != nil {
+            for (position, page) in deck.slides.enumerated() {
+                if position == 0 || deck.slides[position - 1].section != page.section {
+                    rehearsal.append(.init(id: page.id, title: page.section.isEmpty ? "未命名章节" : page.section,
+                                           plannedMinutes: page.plannedChapterMinutes))
+                }
+                rehearsalPages.append(rehearsal.count - 1)
+            }
+            chapterStartedAt = ProcessInfo.processInfo.systemUptime
+        }
         started = Date()
         active = true
         showSingleScreenControls = true
@@ -97,7 +119,10 @@ final class PresentationController: NSObject, ObservableObject, NSWindowDelegate
         } else {
             regularReturnIndex = nil
         }
-        if index != position { ink.removeAll() }
+        if index != position {
+            recordRehearsalElapsed()
+            ink.removeAll()
+        }
         index = position
     }
 
@@ -118,7 +143,20 @@ final class PresentationController: NSObject, ObservableObject, NSWindowDelegate
         configureDisplays()
     }
 
+    private func recordRehearsalElapsed() {
+        guard rehearsalPages.indices.contains(index) else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        rehearsal[rehearsalPages[index]].seconds += max(0, now - chapterStartedAt)
+        chapterStartedAt = now
+    }
+
     func stop() {
+        recordRehearsalElapsed()
+        let completion = rehearsalCompletion
+        let results = rehearsal
+        rehearsalCompletion = nil
+        rehearsalPages.removeAll()
+        rehearsal.removeAll()
         active = false
         if let keyboardMonitor { NSEvent.removeMonitor(keyboardMonitor) }
         keyboardMonitor = nil
@@ -136,6 +174,7 @@ final class PresentationController: NSObject, ObservableObject, NSWindowDelegate
             window.orderOut(nil)
             window.close()
         }
+        completion?(results)
     }
 
     func windowWillClose(_ notification: Notification) {

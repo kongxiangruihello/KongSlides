@@ -230,6 +230,7 @@ struct Slide: Codable, Identifiable, Equatable {
     var teachingCue: TeachingCue?
     var bookmarked: Bool?
     var citation: SlideCitation?
+    var plannedChapterMinutes: Int?
     var objects: [SlideObject] = []
     var importReport: SlideImportReport?
     var hiddenInShow: Bool?

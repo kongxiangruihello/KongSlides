@@ -17,6 +17,7 @@ struct TeachingTemplate: Codable, Identifiable {
         self.slide.teachingCue = nil
         self.slide.bookmarked = nil
         self.slide.citation = nil
+        self.slide.plannedChapterMinutes = nil
         self.slide.importReport = nil
         self.slide.hiddenInShow = nil
         self.images = SlideClipboard(slides: [slide], images: images).images
