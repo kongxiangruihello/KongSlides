@@ -77,7 +77,8 @@ let appWindow = until("Missing editor window") {
 }
 let display = CGDisplayBounds(CGMainDisplayID())
 print("Desktop display bounds:", display)
-var origin = CGPoint(x: display.minX + 15, y: display.minY + 30)
+let width = bounds(appWindow)?.width ?? 1040
+var origin = CGPoint(x: display.minX + min(15, display.width - width - 12), y: display.minY + 30)
 if let position = AXValueCreate(.cgPoint, &origin) {
     print("Positioned test window on the main display:",
           AXUIElementSetAttributeValue(appWindow, kAXPositionAttribute as CFString, position).rawValue)
