@@ -1,0 +1,57 @@
+name: KongSlides 0.2.20 desktop verification
+on:
+  push:
+    branches: [codex/kongslides-0.2.20-desktop]
+    paths: [.github/workflows/verify-0.2.20-desktop.yml, Scripts/verify-0.2.20-editor.swift]
+permissions:
+  actions: read
+  contents: read
+jobs:
+  editor:
+    runs-on: macos-15
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      BUILD_RUN: "46024111209"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download verified candidate
+        run: |
+          gh run watch "$BUILD_RUN" --exit-status --interval 4
+          gh run download "$BUILD_RUN" --name KongSlides-macOS-preview --dir candidate
+          ditto -x -k candidate/KongSlides-macOS-preview.zip candidate
+      - name: Click numbering and save a copy as PPTX
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="$(mktemp -d)"
+          app="$PWD/candidate/KongSlides.app"
+          defaults write com.kongslides.app checkForUpdatesAutomatically -bool false
+          cat > "$root/Classroom.kongslides" <<'JSON'
+          {"schemaVersion":1,"slides":[{"id":"4BF6459E-819C-440E-A535-29DE239F51B1","section":"Classroom","background":"F8F5EE","speakerNotes":"Notes maintained","objects":[]}],"images":[]}
+          JSON
+          original="$(shasum -a 256 "$root/Classroom.kongslides")"
+          swiftc Scripts/verify-0.2.20-editor.swift -o "$root/editor-smoke"
+          open -n -a "$app" "$root/Classroom.kongslides"
+          pid=""
+          for _ in {1..20}; do
+            pid="$(pgrep -nf "$app/Contents/MacOS/KongSlides" || true)"
+            [[ -n "$pid" ]] && break
+            sleep 1
+          done
+          [[ -n "$pid" ]]
+          "$root/editor-smoke" "$pid"
+          for _ in {1..20}; do
+            [[ -s "$root/Classroom.pptx" ]] && break
+            sleep 1
+          done
+          [[ "$(shasum -a 256 "$root/Classroom.kongslides")" == "$original" ]]
+          python3 - "$root/Classroom.pptx" <<'PY'
+          import sys, zipfile, xml.etree.ElementTree as ET
+          with zipfile.ZipFile(sys.argv[1]) as archive:
+              ns = {"a": "http://schemas.openxmlformats.org/drawingml/2006/main"}
+              assert ET.fromstring(archive.read("ppt/slides/slide1.xml")).find(".//a:buAutoNum", ns) is not None
+              assert "Notes maintained" in archive.read("ppt/notesSlides/notesSlide1.xml").decode()
+          print("Saved PPTX contains the editable numbered list and speaker notes. Original native file unchanged.")
+          PY
