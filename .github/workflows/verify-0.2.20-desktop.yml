@@ -43,11 +43,12 @@ jobs:
           [[ -n "$pid" ]]
           "$root/editor-smoke" "$pid"
           for _ in {1..20}; do
-            [[ -s "$root/Classroom.pptx" ]] && break
+            [[ -s "$root/Verified copy.pptx" ]] && break
             sleep 1
           done
+          find "$root" -maxdepth 1 -type f -print
           [[ "$(shasum -a 256 "$root/Classroom.kongslides")" == "$original" ]]
-          python3 - "$root/Classroom.pptx" <<'PY'
+          python3 - "$root/Verified copy.pptx" <<'PY'
           import sys, zipfile, xml.etree.ElementTree as ET
           with zipfile.ZipFile(sys.argv[1]) as archive:
               ns = {"a": "http://schemas.openxmlformats.org/drawingml/2006/main"}

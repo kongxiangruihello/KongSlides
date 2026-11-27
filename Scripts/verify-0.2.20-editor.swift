@@ -98,7 +98,34 @@ _ = awaitElement("PPTX selected") {
     ((get(formats, kAXValueAttribute) as? String)?.contains("PowerPoint") == true ||
         (get(formats, kAXTitleAttribute) as? String)?.contains("PowerPoint") == true) ? formats : nil
 }
-let save = awaitElement("Save button") { located("保存", from: dialog) ?? located("Save", from: dialog) }
-let status = AXUIElementPerformAction(save, kAXPressAction as CFString)
-if status != .success, sheet() != nil { click(save) }
-print("PowerPoint was selected in the Save As sheet and Save was pressed.")
+func describe(_ item: AXUIElement, depth: Int = 0) {
+    let fields = [kAXRoleAttribute, kAXTitleAttribute, kAXDescriptionAttribute, kAXValueAttribute,
+                  kAXEnabledAttribute].compactMap { get(item, $0) }.map { String(describing: $0) }
+    print(String(repeating: " ", count: depth) + fields.joined(separator: " | "))
+    if depth < 5 {
+        for child in (get(item, kAXChildrenAttribute) as? [AXUIElement] ?? []).prefix(12) {
+            describe(child, depth: depth + 1)
+        }
+    }
+}
+let field = awaitElement("filename field") {
+    find(dialog) { get($0, kAXRoleAttribute) as? String == kAXTextFieldRole &&
+        (get($0, kAXValueAttribute) as? String)?.hasPrefix("Classroom") == true }
+}
+print("Filename after selecting PPTX:", get(field, kAXValueAttribute) ?? "(nil)" as CFString)
+let setName = AXUIElementSetAttributeValue(field, kAXValueAttribute as CFString, "Verified copy" as CFString)
+print("Filename AX value change:", setName.rawValue, get(field, kAXValueAttribute) ?? "(nil)" as CFString)
+let save = awaitElement("Save button") {
+    find(dialog) { item in
+        let title = get(item, kAXTitleAttribute) as? String
+        return get(item, kAXRoleAttribute) as? String == kAXButtonRole && (title == "保存" || title == "Save")
+    }
+}
+click(save)
+Thread.sleep(forTimeInterval: 1)
+if let remaining = sheet() {
+    print("Sheet after pressing Save:")
+    describe(remaining)
+} else {
+    print("Save sheet dismissed after clicking Save.")
+}
