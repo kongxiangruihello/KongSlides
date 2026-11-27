@@ -50,12 +50,13 @@ enum ReferencePDF {
     }
 
     static func replace(_ slide: inout Slide, with asset: UUID, size: CGSize) {
-        let scale = min(Deck.size.width / size.width, Deck.size.height / size.height)
-        let width = size.width * scale
-        let height = size.height * scale
+        let frame = Deck.size
+        let scale: CGFloat = min(frame.width / size.width, frame.height / size.height)
+        let width: Double = Double(size.width * scale)
+        let height: Double = Double(size.height * scale)
         slide.background = "FFFFFF"
-        slide.objects = [SlideObject(kind: .image, x: (Deck.size.width - width) / 2,
-                                     y: (Deck.size.height - height) / 2, width: width, height: height, imageID: asset)]
+        slide.objects = [SlideObject(kind: .image, x: (Double(frame.width) - width) / 2,
+                                     y: (Double(frame.height) - height) / 2, width: width, height: height, imageID: asset)]
         if let report = slide.importReport {
             slide.importReport = SlideImportReport(sourceName: report.sourceName,
                                                    sourcePage: report.sourcePage, diagnostics: [])
