@@ -1,0 +1,94 @@
+name: Publish KongSlides v0.2.20
+
+on:
+  push:
+    branches: [release-v0.2.20]
+    paths: [.github/workflows/publish-v0.2.20.yml, Scripts/verify-v0.2.20-upgrade.sh, Scripts/verify-v0.2.20-mouse.swift]
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: kongslides-publish-v0.2.20
+  cancel-in-progress: true
+
+jobs:
+  desktop_smoke:
+    name: Test upgrades on a macOS desktop
+    runs-on: macos-15
+    timeout-minutes: 14
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      sha256: ${{ steps.candidate.outputs.sha256 }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      SOURCE_COMMIT: abd7a793c83b81f3ebeedf7649df21daa1fd2b93
+      BUILD_RUN: "46075954779"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download the tested build
+        shell: bash
+        id: candidate
+        run: |
+          gh run watch "$BUILD_RUN" --exit-status --interval 3
+          read -r head result <<< "$(gh run view "$BUILD_RUN" --json headSha,conclusion --jq '[.headSha,.conclusion] | @tsv')"
+          [[ "$head" == "$SOURCE_COMMIT" && "$result" == success ]]
+          gh run download "$BUILD_RUN" --name KongSlides-macOS-preview --dir candidate
+          echo "sha256=$(shasum -a 256 candidate/KongSlides-macOS-preview.zip | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+      - name: Launch, upgrade, relaunch and reopen an existing deck
+        run: bash Scripts/verify-v0.2.20-upgrade.sh candidate/KongSlides-macOS-preview.zip
+
+  release:
+    needs: desktop_smoke
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      SOURCE_COMMIT: abd7a793c83b81f3ebeedf7649df21daa1fd2b93
+      BUILD_RUN: "46075954779"
+      EXPECTED_SHA256: ${{ needs.desktop_smoke.outputs.sha256 }}
+    steps:
+      - name: Verify the macOS build and prepare assets
+        shell: bash
+        run: |
+          read -r head result <<< "$(gh run view "$BUILD_RUN" --json headSha,conclusion --jq '[.headSha,.conclusion] | @tsv')"
+          [[ "$head" == "$SOURCE_COMMIT" && "$result" == success ]]
+          gh run download "$BUILD_RUN" --name KongSlides-macOS-preview --dir publish
+          cd publish
+          mv KongSlides-macOS-preview.zip KongSlides-0.2.20-macOS-preview.zip
+          printf '%s  %s\n' "$EXPECTED_SHA256" KongSlides-0.2.20-macOS-preview.zip > SHA256SUMS
+          sha256sum --check SHA256SUMS
+          unzip -tq KongSlides-0.2.20-macOS-preview.zip
+      - name: Publish the preview release
+        shell: bash
+        run: |
+          cat > publish/notes.md <<'EOF'
+          - 顶部新增独立的「属性」「导入」「导出」入口。矩形、直线和箭头从画布右键菜单插入。
+          - 修复项目符号和编号在编辑时不显示的问题。列表支持当前段落、文字选区和换行续排。
+          - 「文件 → 另存为 PPTX…」可直接保存可编辑的 PowerPoint 副本。通用「另存为…」也可在保存前选择格式，PPTX 副本保留文字、列表和讲稿。
+
+          安装包适用于 **Apple 芯片、macOS 15 或更新版本**。可从应用内「检查更新…」安装。
+          EOF
+          if ! gh release view v0.2.20 --json isDraft >/dev/null 2>&1; then
+            gh release create v0.2.20 --target "$SOURCE_COMMIT" --title 'KongSlides 0.2.20 教学预览版' \
+              --draft --prerelease --notes-file publish/notes.md
+          fi
+
+          for asset in KongSlides-0.2.20-macOS-preview.zip SHA256SUMS; do
+            remote_digest="$(gh api "repos/$GH_REPO/releases" --jq ".[] | select(.tag_name == \"v0.2.20\") | .assets[] | select(.name == \"$asset\") | .digest")"
+            if [[ -z "$remote_digest" ]]; then
+              [[ "$(gh release view v0.2.20 --json isDraft --jq .isDraft)" == true ]]
+              gh release upload v0.2.20 "publish/$asset"
+              remote_digest="$(gh api "repos/$GH_REPO/releases" --jq ".[] | select(.tag_name == \"v0.2.20\") | .assets[] | select(.name == \"$asset\") | .digest")"
+            fi
+            local_digest="sha256:$(sha256sum "publish/$asset" | cut -d ' ' -f 1)"
+            [[ "$remote_digest" == "$local_digest" ]]
+          done
+
+          gh release edit v0.2.20 --draft=false --prerelease --latest=false
+          [[ "$(gh api "repos/$GH_REPO/commits/v0.2.20" --jq .sha)" == "$SOURCE_COMMIT" ]]
+          gh release view v0.2.20 --json url,isDraft,isPrerelease,assets --jq '{url,isDraft,isPrerelease,assets:[.assets[] | .name]}'
