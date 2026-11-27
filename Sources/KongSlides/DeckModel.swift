@@ -91,6 +91,11 @@ struct SlideImportReport: Codable, Equatable {
 struct SlideObject: Codable, Identifiable, Equatable {
     enum Kind: String, Codable { case text, image, rectangle, table, connector }
 
+    enum DecorationSource: String, Codable {
+        case master, layout
+        var title: String { self == .master ? "PPTX 母版" : "PPTX 版式" }
+    }
+
     var id = UUID()
     var kind: Kind = .text
     var x: Double = 72
@@ -108,6 +113,7 @@ struct SlideObject: Codable, Identifiable, Equatable {
     var pictureAppearance: PictureAppearance?
     var table: SlideTable?
     var connector: SlideConnector?
+    var decorationSource: DecorationSource?
 
     var frame: CGRect { CGRect(x: x, y: y, width: width, height: height) }
 
@@ -160,7 +166,7 @@ struct Slide: Codable, Identifiable, Equatable {
     var isBackup: Bool { hiddenInShow == true }
 
     var title: String {
-        let title = objects.lazy.filter { $0.kind == .text }.map(\.label).first
+        let title = objects.lazy.filter { $0.kind == .text && $0.decorationSource == nil }.map(\.label).first
         return title ?? "空白页"
     }
 

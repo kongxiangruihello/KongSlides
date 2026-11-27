@@ -8,6 +8,8 @@ struct PowerPointLayout {
     var master: XMLElement?
     var theme: XMLElement?
     var defaults: XMLElement?
+    var layoutPath: String?
+    var masterPath: String?
 
     private func placeholders(in part: XMLElement?) -> [XMLElement] {
         (part?.child("cSld")?.child("spTree")?.elementChildren ?? []).filter { $0.placeholder != nil }
@@ -18,17 +20,23 @@ struct PowerPointLayout {
         let index = placeholder.value("idx") ?? "0"
         let type = placeholder.value("type")
         let layoutShapes = placeholders(in: layout)
-        let layoutShape = layoutShapes.first {
-            ($0.placeholder?.value("idx") ?? "0") == index &&
-                (type == nil || $0.placeholderType == type)
-        } ?? layoutShapes.first { ($0.placeholder?.value("idx") ?? "0") == index }
+        let layoutShape: XMLElement?
+        if shape.placeholderType == "ftr" {
+            layoutShape = layoutShapes.first { $0.placeholderType == "ftr" }
+        } else {
+            layoutShape = layoutShapes.first {
+                ($0.placeholder?.value("idx") ?? "0") == index &&
+                    (type == nil || $0.placeholderType == type)
+            } ?? layoutShapes.first { ($0.placeholder?.value("idx") ?? "0") == index }
+        }
 
         let kind = layoutShape?.placeholderType ?? type ?? "obj"
         let masterShapes = placeholders(in: master)
         let masterKind = kind == "ctrTitle" ? "title" : kind
         let masterShape = masterShapes.first { $0.placeholderType == masterKind } ??
             (["body", "obj", "subTitle"].contains(kind) ? masterShapes.first { $0.placeholderType == "body" } : nil)
-        return [shape, layoutShape, masterShape].compactMap { $0 }
+        if masterShape === shape { return [shape] }
+        return [shape, layoutShape === shape ? nil : layoutShape, masterShape].compactMap { $0 }
     }
 
     func defaultText(for shape: XMLElement, ancestry: [XMLElement], level: Int) -> [XMLElement] {

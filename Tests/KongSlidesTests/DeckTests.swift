@@ -196,6 +196,77 @@ final class DeckTests: XCTestCase {
         XCTAssertEqual(slide.importReport?.diagnostics.map(\.detail), ["组合「内层组合」的整体旋转或翻转未保留。"])
     }
 
+    func testPowerPointMasterAndLayoutDecorationsRespectSourceAndLayerOrder() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let url = root.appendingPathComponent("母版样本.pptx")
+        let package = root.appendingPathComponent("package")
+        let id = UUID()
+        let logo = try XCTUnwrap(Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aTioAAAAASUVORK5CYII="))
+        let bodyImage = logo + Data([0])
+        let fixture = Deck(slides: [
+            Slide(objects: [SlideObject(text: "课程标题"), SlideObject(kind: .image, imageID: id)]),
+            Slide(objects: [SlideObject(text: "关闭母版图形")]),
+            Slide(objects: [SlideObject(text: "使用本页页脚")])
+        ], images: [id: bodyImage])
+        try PowerPoint.write(fixture, to: url)
+        try run("/usr/bin/unzip", ["-q", url.path, "-d", package.path])
+        func update(_ part: String, _ change: (String) -> String) throws {
+            let path = package.appendingPathComponent(part)
+            try change(String(contentsOf: path, encoding: .utf8)).write(to: path, atomically: true, encoding: .utf8)
+        }
+        let masterPic = """
+        <p:pic><p:nvPicPr><p:cNvPr id="2" name="校徽"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr>
+        <p:blipFill><a:blip r:embed="rId2"/></p:blipFill><p:spPr><a:xfrm>
+        <a:off x="127000" y="254000"/><a:ext cx="508000" cy="508000"/></a:xfrm></p:spPr></p:pic>
+        """
+        func text(_ name: String, content: String, id: Int, placeholder: String = "") -> String {
+            """
+            <p:sp><p:nvSpPr><p:cNvPr id="\(id)" name="\(name)"/><p:cNvSpPr/><p:nvPr>\(placeholder)</p:nvPr></p:nvSpPr>
+            <p:spPr><a:xfrm><a:off x="127000" y="6350000"/><a:ext cx="3810000" cy="381000"/></a:xfrm></p:spPr>
+            <p:txBody><a:bodyPr/><a:p><a:r><a:rPr sz="1200"/><a:t>\(content)</a:t></a:r></a:p></p:txBody></p:sp>
+            """
+        }
+        let footerPlaceholder = "<p:ph type=\"ftr\" idx=\"9\"/>"
+        let prompt = text("标题占位符", content: "单击此处编辑标题", id: 8, placeholder: "<p:ph type=\"title\"/>")
+        let footer = text("母版页脚", content: "思想史课程", id: 9, placeholder: footerPlaceholder)
+        let layoutDecoration = text("版式字样", content: "教学资料", id: 8)
+        try update("ppt/slideMasters/slideMaster1.xml") {
+            $0.replacingOccurrences(of: "</p:spTree>", with: masterPic + prompt + footer + "</p:spTree>")
+                .replacingOccurrences(of: "</p:sldMaster>", with: "<p:hf ftr=\"1\"/></p:sldMaster>")
+        }
+        try update("ppt/slideLayouts/slideLayout1.xml") {
+            $0.replacingOccurrences(of: "</p:spTree>", with: layoutDecoration + "</p:spTree>")
+        }
+        try update("ppt/slideMasters/_rels/slideMaster1.xml.rels") {
+            $0.replacingOccurrences(of: "Id=\"rId2\"", with: "Id=\"rId99\"")
+                .replacingOccurrences(of: "</Relationships>", with: """
+                <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/master-logo.png"/>
+                </Relationships>
+                """)
+        }
+        try logo.write(to: package.appendingPathComponent("ppt/media/master-logo.png"))
+        try update("ppt/slides/slide2.xml") { $0.replacingOccurrences(of: "<p:sld ", with: "<p:sld showMasterSp=\"false\" ") }
+        let localFooter = text("本页页脚", content: "本页独有", id: 9, placeholder: footerPlaceholder)
+        try update("ppt/slides/slide3.xml") { $0.replacingOccurrences(of: "</p:spTree>", with: localFooter + "</p:spTree>") }
+        try FileManager.default.removeItem(at: url)
+        try run("/usr/bin/zip", ["-qr", url.path, "[Content_Types].xml", "_rels", "ppt"], folder: package)
+
+        let result = try PowerPoint.read(url, prepareImage: { $0 }).deck
+        XCTAssertEqual(result.slides.map(\.title), ["课程标题", "关闭母版图形", "使用本页页脚"])
+        let first = result.slides[0]
+        XCTAssertEqual(first.objects.map(\.decorationSource), [.master, .master, .layout, nil, nil])
+        XCTAssertEqual(first.objects.filter { $0.kind == .text }.map(\.text), ["思想史课程", "教学资料", "课程标题"])
+        let firstLogo = try XCTUnwrap(first.objects.first?.imageID)
+        let firstBody = try XCTUnwrap(first.objects.last?.imageID)
+        XCTAssertEqual(result.images[firstLogo], logo)
+        XCTAssertEqual(result.images[firstBody], bodyImage)
+        XCTAssertEqual(result.slides[1].objects.map(\.decorationSource), [.layout, nil])
+        XCTAssertEqual(result.slides[2].objects.filter { $0.kind == .text }.map(\.text), ["教学资料", "使用本页页脚", "本页独有"])
+        XCTAssertEqual(result.slides[2].objects.first?.imageID, firstLogo)
+    }
+
     func testPreflightIdentifiesClippingAndPDFUsesSameTextFrame() throws {
         let visible = SlideObject(x: 60, y: 40, width: 340, height: 42, text: "VISIBLE\nHIDDEN", fontSize: 27)
         let clean = SlideObject(x: 60, y: 110, width: 340, height: 95, text: "CLEAN LINE", fontSize: 27)

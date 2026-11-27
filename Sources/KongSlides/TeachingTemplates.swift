@@ -20,7 +20,9 @@ struct TeachingTemplate: Codable, Identifiable {
     }
 
     var slots: [Int] {
-        slide.objects.indices.filter { slide.objects[$0].kind == .text }.sorted {
+        slide.objects.indices.filter {
+            slide.objects[$0].kind == .text && slide.objects[$0].decorationSource == nil
+        }.sorted {
             let first = slide.objects[$0]
             let second = slide.objects[$1]
             if first.y != second.y { return first.y < second.y }

@@ -594,6 +594,9 @@ struct EditorView: View {
                 if let selection {
                     let object = slide.objects[selection]
                     Text(object.label).font(.headline).lineLimit(2)
+                    if let source = object.decorationSource {
+                        Text(source.title).font(.caption).foregroundStyle(.secondary)
+                    }
                     if object.kind == .text {
                         TextEditor(text: textBinding(object.id))
                             .frame(height: 82)

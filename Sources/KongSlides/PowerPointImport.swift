@@ -3,6 +3,8 @@ import Foundation
 import FoundationXML
 #endif
 
+private typealias PartRelationships = [String: (type: String, path: String)]
+
 enum PowerPointReadError: LocalizedError {
     case unavailable
     case legacy
@@ -107,14 +109,6 @@ extension PowerPoint {
             if background != nil && backgroundColor == nil {
                 note(.background, "本页使用了渐变、图片或主题背景，已改用白色。")
             }
-            let showMaster = xml.value("showMasterSp") != "0" && context.layout?.value("showMasterSp") != "0"
-            let inheritedParts = [context.layout, showMaster ? context.master : nil].compactMap { $0 }
-            if inheritedParts.contains(where: { part in
-                (part.child("cSld")?.child("spTree")?.elementChildren ?? []).contains {
-                    ["sp", "pic", "grpSp", "graphicFrame", "cxnSp"].contains($0.localName ?? "") && $0.placeholder == nil
-                }
-            }) { note(.unsupported, "版式或母版上的独立装饰对象未转换。") }
-
             if let notes = links.values.first(where: { $0.type == "notesSlide" }) {
                 slide.speakerNotes = try archive.recover({
                     let notesXML = try archive.xml(notes.path)
@@ -123,15 +117,48 @@ extension PowerPoint {
                 }, fallback: "") { note(.unsupported, "讲稿无法读取：\($0.localizedDescription)") }
             }
 
-            let importedObjects = try PowerPointGroup.objects(in: objects) { note($0, $1) }
-            for (element, coordinates) in importedObjects {
+            typealias Layer = (tree: XMLElement, links: PartRelationships, source: SlideObject.DecorationSource?)
+            var layers: [Layer] = []
+            func addLayer(_ part: XMLElement?, path: String?, source: SlideObject.DecorationSource) throws {
+                guard let tree = part?.child("cSld")?.child("spTree"), let path else { return }
+                let resources = try archive.recover({ try archive.inheritedLinks(from: path) }, fallback: [:]) {
+                    note(.unsupported, "\(source.title)部分资源关系无法读取：\($0.localizedDescription)")
+                }
+                layers.append((tree, resources, source))
+            }
+            let showMaster = !xml.hidesPowerPointMasterShapes && context.layout?.hidesPowerPointMasterShapes != true
+            if showMaster { try addLayer(context.master, path: context.masterPath, source: .master) }
+            try addLayer(context.layout, path: context.layoutPath, source: .layout)
+            layers.append((objects, links, nil))
+
+            let inheritedFooter = [context.layout, context.master].compactMap { $0?.child("hf")?.value("ftr") }.first
+            let hasSlideFooter = objects.elementChildren.contains { $0.placeholderType == "ftr" }
+            let layoutFooter = context.layout?.child("cSld")?.child("spTree")?
+                .elementChildren.first { $0.placeholderType == "ftr" }
+            var importedObjects: [(element: XMLElement, coordinates: PowerPointGroup, layer: Layer)] = []
+            for layer in layers {
+                let objects = try PowerPointGroup.objects(in: layer.tree) { note($0, $1) }
+                importedObjects += objects.map { ($0.element, $0.coordinates, layer) }
+            }
+            for (element, coordinates, layer) in importedObjects {
+                let isInheritedFooter = layer.source != nil && element.placeholderType == "ftr"
+                if layer.source != nil, element.placeholder != nil {
+                    guard isInheritedFooter, !hasSlideFooter, ["1", "true"].contains(inheritedFooter ?? ""),
+                          layer.source == .layout || layoutFooter == nil else { continue }
+                }
+                func append(_ object: SlideObject) {
+                    var editable = object
+                    editable.decorationSource = layer.source
+                    slide.objects.append(editable)
+                }
+
                 try Task.checkCancellation()
                 let name = element.localName ?? ""
                 let label = element.powerPointLabel
                 let preset = element.child("spPr")?.child("prstGeom")?.value("prst")
                 if name == "cxnSp" || (name == "sp" && ["line", "lineInv"].contains(preset ?? "")) {
                     if let imported = ImportedConnector(element, context: context, unit: factor, coordinates: coordinates) {
-                        slide.objects.append(imported.object)
+                        append(imported.object)
                         for warning in imported.warnings {
                             note(.geometry, "连接线「\(label)」\(warning)", object: imported.object.id)
                         }
@@ -142,7 +169,7 @@ extension PowerPoint {
                 }
                 if name == "graphicFrame", let table = element.child("graphic")?.child("graphicData")?.child("tbl") {
                     if let imported = ImportedTable(table, transform: element.child("xfrm"), context: context, unit: factor, coordinates: coordinates) {
-                        slide.objects.append(imported.object)
+                        append(imported.object)
                         for warning in imported.warnings {
                             note(.unsupported, "表格「\(label)」\(warning)", object: imported.object.id)
                         }
@@ -185,10 +212,11 @@ extension PowerPoint {
                 if name == "pic" {
                     let blip = element.child("blipFill")?.child("blip")
                     guard let ref = blip?.officeRelationship("embed"),
-                          let imagePath = links[ref]?.path else {
+                          let imageLink = layer.links[ref], imageLink.type == "image" else {
                         note(.image, "「\(label)」没有可读取的嵌入图片。")
                         continue
                     }
+                    let imagePath = imageLink.path
                     if imageIDs[imagePath] == nil {
                         let imageData = try archive.recover({
                             try archive.part(imagePath, maximum: 48 * 1024 * 1024)
@@ -240,11 +268,14 @@ extension PowerPoint {
                             note(.crop, "「\(label)」的留白或特殊裁剪未保留，已显示原图。", object: object.id)
                         }
                     }
-                    slide.objects.append(object)
+                    append(object)
                     continue
                 }
 
-                let textBody = element.child("txBody")
+                let localBody = element.child("txBody")
+                let textBody = isInheritedFooter && localBody?.plainText.isEmpty != false
+                    ? ancestry.dropFirst().compactMap { $0.child("txBody") }.first(where: { !$0.plainText.isEmpty })
+                    : localBody
                 let text = textBody?.text(softBreak: "\u{2028}") ?? ""
                 let fill = properties.flatMap { context.color($0) }
                 guard !text.isEmpty || fill != nil else {
@@ -265,14 +296,14 @@ extension PowerPoint {
                     if !text.isEmpty { background.id = UUID() }
                     background.kind = .rectangle
                     background.color = fill
-                    slide.objects.append(background)
+                    append(background)
                 }
                 if let textBody, !text.isEmpty {
                     let imported = ImportedText(body: textBody, shape: element, ancestry: ancestry,
                                                 context: context, unit: factor * coordinates.textScale, frame: object.frame)
                     object.text = text
                     let type = ancestry.dropFirst().first?.placeholderType ?? element.placeholderType
-                    let defaultSize = ["title", "ctrTitle"].contains(type ?? "") ? 46.0 : 30.0
+                    let defaultSize = type == "ftr" ? 12.0 : ["title", "ctrTitle"].contains(type ?? "") ? 46.0 : 30.0
                     object.fontSize = imported.size ?? min(200, max(8, defaultSize * coordinates.textScale))
                     object.bold = imported.bold
                     object.color = imported.color
@@ -291,7 +322,7 @@ extension PowerPoint {
                     if imported.approximateParagraph {
                         note(.paragraph, "「\(label)」的特殊段落格式、自动缩放或编号已简化。", object: object.id)
                     }
-                    slide.objects.append(object)
+                    append(object)
                 }
             }
             if xml.child("timing") != nil || xml.child("transition") != nil {
@@ -316,6 +347,7 @@ private final class PresentationArchive {
     let url: URL
     private var layouts: [String: PowerPointLayout] = [:]
     private var inheritedParts: [String: XMLElement] = [:]
+    private var inheritedRelationships: [String: PartRelationships] = [:]
     private var remaining = 192 * 1024 * 1024
 
     init(url: URL) throws {
@@ -351,14 +383,23 @@ private final class PresentationArchive {
         if let existing = layouts[path] { return existing }
         var result = PowerPointLayout(defaults: defaults)
         result.layout = try inheritedPart(path)
-        if let path = try links(from: path, optional: true).values.first(where: { $0.type == "slideMaster" })?.path {
+        result.layoutPath = path
+        if let path = try inheritedLinks(from: path).values.first(where: { $0.type == "slideMaster" })?.path {
             result.master = try inheritedPart(path)
-            if let theme = try links(from: path, optional: true).values.first(where: { $0.type == "theme" })?.path {
+            result.masterPath = path
+            if let theme = try inheritedLinks(from: path).values.first(where: { $0.type == "theme" })?.path {
                 result.theme = try inheritedPart(theme)
             }
         }
         layouts[path] = result
         return result
+    }
+
+    func inheritedLinks(from path: String) throws -> PartRelationships {
+        if let cached = inheritedRelationships[path] { return cached }
+        let relationships = try links(from: path, optional: true)
+        inheritedRelationships[path] = relationships
+        return relationships
     }
 
     private func inheritedPart(_ path: String) throws -> XMLElement {
@@ -376,13 +417,13 @@ private final class PresentationArchive {
         return root
     }
 
-    func links(from part: String, optional: Bool = false) throws -> [String: (type: String, path: String)] {
+    func links(from part: String, optional: Bool = false) throws -> PartRelationships {
         let location = part.split(separator: "/").map(String.init)
         let folder = Array(location.dropLast())
         let path = (folder + ["_rels", (location.last ?? "") + ".rels"]).joined(separator: "/")
         guard let data = try self.part(path, maximum: 4 * 1024 * 1024, optional: optional) else { return [:] }
         let document = try xmlDocument(data, path: path)
-        var result: [String: (type: String, path: String)] = [:]
+        var result: PartRelationships = [:]
         for item in document.rootElement()?.children(named: "Relationship") ?? [] {
             guard item.unqualifiedAttribute("TargetMode")?.stringValue != "External",
                   let id = item.unqualifiedAttribute("Id")?.stringValue,
@@ -473,6 +514,8 @@ private final class PresentationArchive {
 }
 
 extension XMLElement {
+    var hidesPowerPointMasterShapes: Bool { ["false", "0"].contains(value("showMasterSp") ?? "") }
+
     func officeRelationship(_ localName: String) -> String? {
         OfficeNamespace.relationships.lazy.compactMap {
             self.attribute(forLocalName: localName, uri: $0)?.stringValue
