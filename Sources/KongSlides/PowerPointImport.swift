@@ -60,8 +60,10 @@ extension PowerPoint {
             try Task.checkCancellation()
             defer { progress?(index + 1, slideIDs.count) }
             var diagnostics: [ImportDiagnostic] = []
-            func note(_ kind: ImportDiagnostic.Kind, _ detail: String, object: UUID? = nil) {
-                let diagnostic = ImportDiagnostic(kind: kind, detail: detail, objectID: object)
+            func note(_ kind: ImportDiagnostic.Kind, _ detail: String, object: UUID? = nil,
+                      impact: ImportDiagnostic.Impact? = nil) {
+                var diagnostic = ImportDiagnostic(kind: kind, detail: detail, objectID: object)
+                diagnostic.recordedImpact = impact ?? diagnostic.impact
                 if !diagnostics.contains(diagnostic) { diagnostics.append(diagnostic) }
             }
             let xml: XMLElement
@@ -83,7 +85,7 @@ extension PowerPoint {
                 try Task.checkCancellation()
                 if slideIDs.count == 1 { throw error }
                 let warning = "无法转换源第 \(index + 1) 页：\(error.localizedDescription)"
-                note(.unsupported, warning)
+                note(.unsupported, warning, impact: .pageUnavailable)
                 var placeholder = Slide.titleSlide("源第 \(index + 1) 页未转换", subtitle: error.localizedDescription)
                 placeholder.hiddenInShow = true
                 placeholder.importReport = SlideImportReport(sourceName: source, sourcePage: index + 1, diagnostics: diagnostics)
@@ -171,7 +173,7 @@ extension PowerPoint {
                     if let imported = ImportedTable(table, transform: element.child("xfrm"), context: context, unit: factor, coordinates: coordinates) {
                         append(imported.object)
                         for warning in imported.warnings {
-                            note(.unsupported, "表格「\(label)」\(warning)", object: imported.object.id)
+                            note(.unsupported, "表格「\(label)」\(warning)", object: imported.object.id, impact: .appearance)
                         }
                     } else {
                         note(.unsupported, "表格「\(label)」的尺寸或合并结构无法转换。")
@@ -251,7 +253,7 @@ extension PowerPoint {
                     }
                     if picture != PictureAppearance() { object.pictureAppearance = picture }
                     if blip?.elementChildren.contains(where: { ["alphaBiLevel", "alphaInv", "alphaRepl", "alphaMod"].contains($0.localName ?? "") }) == true {
-                        note(.image, "「\(label)」的特殊透明效果已简化。", object: object.id)
+                        note(.image, "「\(label)」的特殊透明效果已简化。", object: object.id, impact: .appearance)
                     }
                     if !hasGeometry { note(.geometry, "「\(label)」使用了默认位置。", object: object.id) }
                     if let crop = element.child("blipFill")?.child("srcRect") {

@@ -267,6 +267,46 @@ final class DeckTests: XCTestCase {
         XCTAssertEqual(result.slides[2].objects.first?.imageID, firstLogo)
     }
 
+    func testImportReportPrioritizesUnreadablePageAndKeepsReadableSlides() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("部分损坏.pptx")
+        let slides = [
+            Slide(objects: [SlideObject(text: "仍能读取", textLayout: SlideTextLayout(fontName: "Missing test font"))]),
+            Slide(objects: [SlideObject(text: "源页缺失")]),
+            Slide(objects: [SlideObject(text: "末页")])
+        ]
+        try PowerPoint.write(Deck(slides: slides), to: url)
+        try run("/usr/bin/zip", ["-dq", url.path, "ppt/slides/slide2.xml"])
+        let imported = try PowerPoint.read(url, fontAvailable: { _ in false }, prepareImage: { $0 }).deck
+        XCTAssertEqual(imported.slides.count, 3)
+        XCTAssertEqual(imported.slides[0].title, "仍能读取")
+        XCTAssertEqual(imported.slides[2].title, "末页")
+        XCTAssertTrue(imported.slides[1].isBackup)
+        let report = SlideReviewRow.imported(imported)
+        XCTAssertEqual(report.first?.impact, .pageUnavailable)
+        XCTAssertEqual(report.first?.page, 2)
+        XCTAssertEqual(report.first?.title, "整页读取失败")
+        XCTAssertTrue(report.contains { $0.page == 1 && $0.impact == .appearance })
+    }
+
+    func testOlderImportDiagnosticsAreClassifiedWithoutChangingSavedContent() throws {
+        let data = Data("""
+        [
+          {"kind":"font","detail":"本机缺少字体"},
+          {"kind":"unsupported","detail":"无法转换源第 2 页"},
+          {"kind":"image","detail":"图片无法解码"},
+          {"kind":"unsupported","detail":"表格样式已简化","objectID":"7611AD92-63EA-4980-B5A8-2043A719F3C4"}
+        ]
+        """.utf8)
+        let issues = try JSONDecoder().decode([ImportDiagnostic].self, from: data)
+        XCTAssertEqual(issues.map(\.impact), [.appearance, .pageUnavailable, .contentMissing, .appearance])
+        XCTAssertEqual(issues.last?.title, "部分格式已简化")
+        let encoded = try JSONEncoder().encode(issues)
+        XCTAssertEqual(try JSONDecoder().decode([ImportDiagnostic].self, from: encoded), issues)
+    }
+
     func testPreflightIdentifiesClippingAndPDFUsesSameTextFrame() throws {
         let visible = SlideObject(x: 60, y: 40, width: 340, height: 42, text: "VISIBLE\nHIDDEN", fontSize: 27)
         let clean = SlideObject(x: 60, y: 110, width: 340, height: 95, text: "CLEAN LINE", fontSize: 27)

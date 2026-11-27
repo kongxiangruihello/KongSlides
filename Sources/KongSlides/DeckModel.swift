@@ -77,9 +77,46 @@ struct ImportDiagnostic: Codable, Equatable {
         }
     }
 
+    enum Impact: String, Codable, CaseIterable, Identifiable {
+        case pageUnavailable, contentMissing, appearance
+
+        var id: Self { self }
+
+        var title: String {
+            switch self {
+            case .pageUnavailable: "页面未读出"
+            case .contentMissing: "内容未转换"
+            case .appearance: "样式或效果差异"
+            }
+        }
+    }
+
     let kind: Kind
     let detail: String
     let objectID: UUID?
+    var recordedImpact: Impact? = nil
+
+    var impact: Impact {
+        if let recordedImpact { return recordedImpact }
+        switch kind {
+        case .unsupported where detail.hasPrefix("无法转换源"):
+            return .pageUnavailable
+        case .unsupported, .image:
+            // Previous releases attached the object ID when its content did import.
+            return objectID == nil ? .contentMissing : .appearance
+        default:
+            return .appearance
+        }
+    }
+
+    var title: String {
+        switch (impact, kind) {
+        case (.pageUnavailable, _): return "整页读取失败"
+        case (.appearance, .unsupported): return "部分格式已简化"
+        case (.appearance, .image): return "图片效果近似"
+        default: return kind.title
+        }
+    }
 }
 
 struct SlideImportReport: Codable, Equatable {

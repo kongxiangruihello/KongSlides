@@ -15,24 +15,27 @@ struct SlideReviewRow: Identifiable {
         let object: UUID?
         let title: String
         let detail: String
+        let impact: ImportDiagnostic.Impact?
     }
 
-    var id: ID { ID(slide: slideID, object: objectID, title: title, detail: detail) }
+    var id: ID { ID(slide: slideID, object: objectID, title: title, detail: detail, impact: impact) }
     let slideID: UUID
     let objectID: UUID?
     var page: Int
     let title: String
     let detail: String
     var source: String? = nil
+    var impact: ImportDiagnostic.Impact? = nil
 
     static func imported(_ deck: Deck) -> [Self] {
-        deck.slides.enumerated().flatMap { index, slide -> [Self] in
+        let rows = deck.slides.enumerated().flatMap { index, slide -> [Self] in
             guard let report = slide.importReport else { return [] }
             return report.diagnostics.map { issue in
-                Self(slideID: slide.id, objectID: issue.objectID, page: index + 1, title: issue.kind.title,
-                     detail: issue.detail, source: "\(report.sourceName) · 源第 \(report.sourcePage) 页")
+                Self(slideID: slide.id, objectID: issue.objectID, page: index + 1, title: issue.title,
+                     detail: issue.detail, source: "\(report.sourceName) · 源第 \(report.sourcePage) 页", impact: issue.impact)
             }
         }
+        return ImportDiagnostic.Impact.allCases.flatMap { impact in rows.filter { $0.impact == impact } }
     }
 
     static func preflight(_ deck: Deck) -> [Self] {
@@ -85,6 +88,12 @@ struct SlideReviewPanel: View {
     let close: () -> Void
     let reveal: (SlideReviewRow) -> Void
 
+    @State private var impactFilter: ImportDiagnostic.Impact?
+    private var shownRows: [SlideReviewRow] {
+        guard mode == .imported, let impactFilter else { return rows }
+        return rows.filter { $0.impact == impactFilter }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
             HStack(spacing: 10) {
@@ -106,25 +115,45 @@ struct SlideReviewPanel: View {
                     .accessibilityLabel("关闭检查面板")
             }
             if mode == .imported {
-                Text("记录导入时的转换情况。页码随当前课件顺序更新。")
-                    .font(.caption).foregroundStyle(.secondary)
+                HStack(spacing: 8) {
+                    Picker("影响程度", selection: $impactFilter) {
+                        Text("全部（\(rows.count)）").tag(nil as ImportDiagnostic.Impact?)
+                        ForEach(ImportDiagnostic.Impact.allCases) { impact in
+                            let count = rows.count(where: { $0.impact == impact })
+                            Text("\(impact.title)（\(count)）").tag(Optional(impact))
+                        }
+                    }
+                    .fixedSize()
+                    Text("严重问题优先，点击条目定位到当前课件的对应页。")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Spacer(minLength: 0)
+                }
             }
-            if rows.isEmpty {
+            if shownRows.isEmpty {
                 Text(checking ? "正在检查课件…" : mode == .preflight
-                     ? "未发现需处理的文字、字体或画布问题。" : "导入时未记录需要核对的项目。")
+                     ? "未发现需处理的文字、字体或画布问题。"
+                     : impactFilter == nil ? "导入时未记录需要核对的项目。" : "没有符合筛选条件的条目。")
                     .font(.callout).foregroundStyle(.secondary)
                     .frame(maxHeight: .infinity, alignment: .topLeading)
             } else {
                 ScrollView {
                     LazyVStack(spacing: 0) {
-                        ForEach(rows) { row in
+                        ForEach(shownRows) { row in
                             Button { reveal(row) } label: {
                                 HStack(alignment: .top, spacing: 10) {
                                     Text("第 \(row.page) 页").monospacedDigit()
                                         .frame(width: 62, alignment: .leading)
                                         .foregroundStyle(Color.accentColor)
                                     VStack(alignment: .leading, spacing: 3) {
-                                        Text(row.title).fontWeight(.medium)
+                                        HStack(spacing: 8) {
+                                            Text(row.title).fontWeight(.medium)
+                                            if let impact = row.impact {
+                                                Text(impact.title)
+                                                    .font(.caption)
+                                                    .foregroundStyle(impact == .pageUnavailable ? Color.red :
+                                                        impact == .contentMissing ? Color.orange : Color.secondary)
+                                            }
+                                        }
                                         Text(row.detail).foregroundStyle(.secondary)
                                         if let source = row.source {
                                             Text(source).font(.caption).foregroundStyle(.secondary)
@@ -144,7 +173,7 @@ struct SlideReviewPanel: View {
             }
         }
         .padding(11)
-        .frame(height: 168)
+        .frame(height: mode == .imported ? 192 : 168)
         .background(Color(nsColor: .controlBackgroundColor))
     }
 }
