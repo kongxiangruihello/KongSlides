@@ -7,7 +7,7 @@ struct ImportedTable {
     let object: SlideObject
     var warnings: [String] = []
 
-    init?(_ element: XMLElement, transform: XMLElement?, context: PowerPointLayout, unit: Double) {
+    init?(_ element: XMLElement, transform: XMLElement?, context: PowerPointLayout, unit: Double, coordinates: PowerPointGroup) {
         let columnNodes = element.child("tblGrid")?.children(named: "gridCol") ?? []
         let rowNodes = element.children(named: "tr")
         guard !rowNodes.isEmpty, !columnNodes.isEmpty,
@@ -17,13 +17,13 @@ struct ImportedTable {
         guard (rows + columns).allSatisfy({ $0 > 0 && $0 <= 200_000_000 }) else { return nil }
         let origin = transform?.child("off")
         let extent = transform?.child("ext")
-        let x = (origin?.number("x") ?? 0) * unit
-        let y = (origin?.number("y") ?? 0) * unit
-        let width = max(1, (extent?.number("cx") ?? columns.reduce(0, +)) * unit)
-        let height = max(1, (extent?.number("cy") ?? rows.reduce(0, +)) * unit)
-        guard abs(x) <= 9_000, abs(y) <= 9_000, width <= 10_000, height <= 10_000 else { return nil }
-        let columnEdges = SlideTable.edges(columns, across: width)
-        let rowEdges = SlideTable.edges(rows, across: height)
+        let width = extent?.number("cx") ?? columns.reduce(0, +)
+        let height = extent?.number("cy") ?? rows.reduce(0, +)
+        guard let frame = coordinates.frame(x: origin?.number("x") ?? 0, y: origin?.number("y") ?? 0,
+                                            width: width, height: height, unit: unit) else { return nil }
+        let textUnit = unit * coordinates.textScale
+        let columnEdges = SlideTable.edges(columns, across: frame.width)
+        let rowEdges = SlideTable.edges(rows, across: frame.height)
         var cells: [SlideTable.Cell] = []
         var approximate = element.child("tblPr")?.child("tableStyleId") != nil ||
             element.child("tblPr")?.child("tableStyle") != nil
@@ -58,13 +58,13 @@ struct ImportedTable {
                 if let body = node.child("txBody") {
                     cell.text = body.text(softBreak: "\u{2028}")
                     let imported = ImportedText(body: body, shape: node, ancestry: [node], context: context,
-                                                unit: unit, frame: CGRect(x: 0, y: 0, width: cellWidth, height: cellHeight))
-                    cell.fontSize = imported.size ?? 18
+                                                unit: textUnit, frame: CGRect(x: 0, y: 0, width: cellWidth, height: cellHeight))
+                    cell.fontSize = imported.size ?? min(200, max(8, 18 * coordinates.textScale))
                     cell.bold = imported.bold
                     cell.color = imported.color
                     var layout = imported.layout
                     func margin(_ name: String, defaultValue: Double, dimension: Double) -> Double {
-                        min(dimension / 2, max(0, (properties?.number(name) ?? defaultValue) * unit))
+                        min(dimension / 2, max(0, (properties?.number(name) ?? defaultValue) * textUnit))
                     }
                     layout.insets = .init(left: margin("marL", defaultValue: 91_440, dimension: cellWidth),
                                          top: margin("marT", defaultValue: 45_720, dimension: cellHeight),
@@ -82,7 +82,8 @@ struct ImportedTable {
         }
         let table = SlideTable(columns: columns, rows: rows, cells: cells)
         guard table.isValid else { return nil }
-        object = SlideObject(kind: .table, x: x, y: y, width: width, height: height, table: table)
+        object = SlideObject(kind: .table, x: frame.minX, y: frame.minY, width: frame.width, height: frame.height, table: table)
+        if transform?.hasPowerPointReorientation == true { warnings.append("的旋转或翻转未保留。") }
         if approximate { warnings.append("的主题样式、特殊边框或局部排版已简化。") }
     }
 }

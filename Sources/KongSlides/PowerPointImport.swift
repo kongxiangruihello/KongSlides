@@ -123,14 +123,13 @@ extension PowerPoint {
                 }, fallback: "") { note(.unsupported, "讲稿无法读取：\($0.localizedDescription)") }
             }
 
-            for element in objects.elementChildren {
+            let importedObjects = try PowerPointGroup.objects(in: objects) { note($0, $1) }
+            for (element, coordinates) in importedObjects {
+                try Task.checkCancellation()
                 let name = element.localName ?? ""
-                if name == "nvGrpSpPr" || name == "grpSpPr" { continue }
-                let sourceName = element.elementChildren.first { $0.localName?.hasPrefix("nv") == true }?
-                    .child("cNvPr")?.value("name")
-                let label = String((sourceName?.isEmpty == false ? sourceName ?? name : name).prefix(60))
+                let label = element.powerPointLabel
                 if name == "graphicFrame", let table = element.child("graphic")?.child("graphicData")?.child("tbl") {
-                    if let imported = ImportedTable(table, transform: element.child("xfrm"), context: context, unit: factor) {
+                    if let imported = ImportedTable(table, transform: element.child("xfrm"), context: context, unit: factor, coordinates: coordinates) {
                         slide.objects.append(imported.object)
                         for warning in imported.warnings {
                             note(.unsupported, "表格「\(label)」\(warning)", object: imported.object.id)
@@ -141,7 +140,7 @@ extension PowerPoint {
                     continue
                 }
                 guard name == "sp" || name == "pic" else {
-                    let type = ["grpSp": "组合对象", "graphicFrame": "图表或 SmartArt", "cxnSp": "连接线"][name] ?? "对象"
+                    let type = ["graphicFrame": "图表或 SmartArt", "cxnSp": "连接线"][name] ?? "对象"
                     note(.unsupported, "\(type)「\(label)」未转换。")
                     continue
                 }
@@ -156,22 +155,18 @@ extension PowerPoint {
                 let hasGeometry: Bool
                 if let x = origin?.number("x"), let y = origin?.number("y"),
                    let width = extent?.number("cx"), let height = extent?.number("cy"),
-                   abs(x * factor) <= 9_000, abs(y * factor) <= 9_000,
-                   width > 0, width * factor <= 10_000, height > 0, height * factor <= 10_000 {
-                    object.x = x * factor
-                    object.y = y * factor
-                    object.width = max(1, width * factor)
-                    object.height = max(1, height * factor)
+                   let frame = coordinates.frame(x: x, y: y, width: width, height: height, unit: factor) {
+                    object.x = frame.minX
+                    object.y = frame.minY
+                    object.width = frame.width
+                    object.height = frame.height
                     hasGeometry = true
                 } else {
                     object.y = slide.objects.isEmpty ? 72 : min(390, 72 + Double(slide.objects.count) * 112)
                     object.height = slide.objects.isEmpty ? 100 : 140
                     hasGeometry = false
                 }
-                func hasFlip(_ attribute: String) -> Bool {
-                    ["1", "true"].contains(transform?.value(attribute) ?? "")
-                }
-                if name != "pic", (transform?.number("rot") ?? 0) != 0 || hasFlip("flipH") || hasFlip("flipV") {
+                if name != "pic", transform?.hasPowerPointReorientation == true {
                     note(.geometry, "「\(label)」的旋转或翻转未保留。", object: object.id)
                 }
 
@@ -208,7 +203,12 @@ extension PowerPoint {
                     }
                     let normalizedAngle = (angle + 180).truncatingRemainder(dividingBy: 360)
                     let picture = PictureAppearance(angle: (normalizedAngle + 360).truncatingRemainder(dividingBy: 360) - 180,
-                                                    opacity: opacity, flipHorizontal: hasFlip("flipH"), flipVertical: hasFlip("flipV"))
+                                                    opacity: opacity, flipHorizontal: transform?.powerPointFlag("flipH") == true,
+                                                    flipVertical: transform?.powerPointFlag("flipV") == true)
+                    if angle.truncatingRemainder(dividingBy: 180) != 0,
+                       abs(coordinates.scaleX - coordinates.scaleY) > max(coordinates.scaleX, coordinates.scaleY) * 0.001 {
+                        note(.geometry, "「\(label)」在非等比组合中的旋转效果已近似转换。", object: object.id)
+                    }
                     if picture != PictureAppearance() { object.pictureAppearance = picture }
                     if blip?.elementChildren.contains(where: { ["alphaBiLevel", "alphaInv", "alphaRepl", "alphaMod"].contains($0.localName ?? "") }) == true {
                         note(.image, "「\(label)」的特殊透明效果已简化。", object: object.id)
@@ -258,10 +258,11 @@ extension PowerPoint {
                 }
                 if let textBody, !text.isEmpty {
                     let imported = ImportedText(body: textBody, shape: element, ancestry: ancestry,
-                                                context: context, unit: factor, frame: object.frame)
+                                                context: context, unit: factor * coordinates.textScale, frame: object.frame)
                     object.text = text
                     let type = ancestry.dropFirst().first?.placeholderType ?? element.placeholderType
-                    object.fontSize = imported.size ?? (["title", "ctrTitle"].contains(type ?? "") ? 46 : 30)
+                    let defaultSize = ["title", "ctrTitle"].contains(type ?? "") ? 46.0 : 30.0
+                    object.fontSize = imported.size ?? min(200, max(8, defaultSize * coordinates.textScale))
                     object.bold = imported.bold
                     object.color = imported.color
                     object.textLayout = imported.layout

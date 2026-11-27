@@ -150,6 +150,52 @@ final class DeckTests: XCTestCase {
         XCTAssertEqual(slide.importReport?.diagnostics.map(\.kind), [.unsupported])
     }
 
+    func testNestedPowerPointGroupsImportAsEditableObjects() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let url = root.appendingPathComponent("组合样本.pptx")
+        let package = root.appendingPathComponent("package")
+        let imageID = UUID()
+        let png = try XCTUnwrap(Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aTioAAAAASUVORK5CYII="))
+        let image = SlideObject(kind: .image, x: 20, y: 40, width: 50, height: 30, imageID: imageID)
+        let text = SlideObject(x: 15, y: 30, width: 120, height: 45, text: "组合里可编辑的原文", fontSize: 24)
+        let source = Deck(slides: [Slide(objects: [image, text])], images: [imageID: png])
+        try PowerPoint.write(source, to: url)
+        try run("/usr/bin/unzip", ["-q", url.path, "-d", package.path])
+
+        let page = package.appendingPathComponent("ppt/slides/slide1.xml")
+        var xml = try String(contentsOf: page, encoding: .utf8)
+        let outer = """
+        <p:grpSp><p:nvGrpSpPr><p:cNvPr id="20" name="外层组合"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
+        <p:grpSpPr><a:xfrm><a:off x="1270000" y="1016000"/><a:ext cx="5080000" cy="3810000"/>
+        <a:chOff x="127000" y="254000"/><a:chExt cx="2540000" cy="1905000"/></a:xfrm></p:grpSpPr>
+        """
+        let inner = """
+        <p:grpSp><p:nvGrpSpPr><p:cNvPr id="21" name="内层组合"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
+        <p:grpSpPr><a:xfrm rot="1800000"><a:off x="508000" y="762000"/><a:ext cx="1270000" cy="635000"/>
+        <a:chOff x="63500" y="127000"/><a:chExt cx="2540000" cy="1270000"/></a:xfrm></p:grpSpPr>
+        """
+        xml = xml.replacingOccurrences(of: "<p:grpSpPr/>", with: "<p:grpSpPr/>" + outer)
+        xml = xml.replacingOccurrences(of: "</p:pic>", with: "</p:pic>" + inner)
+        xml = xml.replacingOccurrences(of: "</p:spTree>", with: "</p:grpSp></p:grpSp></p:spTree>")
+        try xml.write(to: page, atomically: true, encoding: .utf8)
+        try FileManager.default.removeItem(at: url)
+        try run("/usr/bin/zip", ["-qr", url.path, "[Content_Types].xml", "_rels", "ppt"], folder: package)
+
+        let deck = try PowerPoint.read(url, prepareImage: { $0 }).deck
+        let slide = try XCTUnwrap(deck.slides.first)
+        XCTAssertEqual(slide.objects.map(\.kind), [.image, .text])
+        let picture = try XCTUnwrap(slide.objects.first)
+        let editable = try XCTUnwrap(slide.objects.last)
+        XCTAssertEqual(picture.frame, CGRect(x: 120, y: 120, width: 100, height: 60))
+        XCTAssertEqual(editable.frame, CGRect(x: 170, y: 180, width: 120, height: 45))
+        XCTAssertEqual(editable.text, text.text)
+        XCTAssertEqual(editable.fontSize, 24)
+        XCTAssertEqual(deck.images.values.first, png)
+        XCTAssertEqual(slide.importReport?.diagnostics.map(\.detail), ["组合「内层组合」的整体旋转或翻转未保留。"])
+    }
+
     func testPreflightIdentifiesClippingAndPDFUsesSameTextFrame() throws {
         let visible = SlideObject(x: 60, y: 40, width: 340, height: 42, text: "VISIBLE\nHIDDEN", fontSize: 27)
         let clean = SlideObject(x: 60, y: 110, width: 340, height: 95, text: "CLEAN LINE", fontSize: 27)
