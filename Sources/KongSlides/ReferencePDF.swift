@@ -49,8 +49,8 @@ enum ReferencePDF {
         return image
     }
 
-    static func replace(_ slide: inout Slide, with asset: UUID, size: CGSize) {
-        let frame = Deck.size
+    static func replace(_ slide: inout Slide, with asset: UUID, size: CGSize, canvas: SlideCanvas = .widescreen) {
+        let frame = canvas.size
         let scale: CGFloat = min(frame.width / size.width, frame.height / size.height)
         let width: Double = Double(size.width * scale)
         let height: Double = Double(size.height * scale)
@@ -91,7 +91,7 @@ struct ReferencePDFView: View {
                 HStack(spacing: 14) {
                     VStack(alignment: .leading) {
                         Text("当前课件　\(deck.slides[slideIndex].title)").font(.headline).lineLimit(1)
-                        SlideSurface(slide: deck.slides[slideIndex], images: deck.images)
+                        SlideSurface(slide: deck.slides[slideIndex], images: deck.images, canvas: deck.pageCanvas)
                             .border(.secondary.opacity(0.25))
                             .frame(maxHeight: .infinity, alignment: .center)
                     }

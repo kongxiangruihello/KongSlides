@@ -118,7 +118,7 @@ struct TeachingOutlineView: View {
                 if let layout = currentLayout, let range = layout.ranges[draft.wrappedValue.id] {
                     let index = min(previewIndex, range.count - 1)
                     let page = layout.clipboard.slides[range.lowerBound + index]
-                    SlideSurface(slide: page, images: layout.clipboard.images).border(.secondary.opacity(0.25))
+                    SlideSurface(slide: page, images: layout.clipboard.images, canvas: layout.clipboard.canvas ?? .widescreen).border(.secondary.opacity(0.25))
                     HStack {
                         Button("上一张") { previewIndex = index - 1 }.disabled(index == 0)
                         Text("第 \(index + 1) / \(range.count) 张").monospacedDigit()

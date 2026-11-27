@@ -18,6 +18,7 @@ final class AppLifecycle: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         timer?.invalidate()
+        RecoverySession.shared.finish()
         SoftwareUpdate.shared.finishQuitting()
     }
 }

@@ -49,11 +49,11 @@ struct SlidesDocument: FileDocument {
 }
 
 enum SlideDrawing {
-    static func draw(_ slide: Slide, images: [UUID: Data], in context: CGContext) {
+    static func draw(_ slide: Slide, images: [UUID: Data], in context: CGContext, canvas: SlideCanvas = .widescreen) {
         // PDF and the SwiftUI canvas both enter here in bottom-left coordinates.
-        let height = Deck.size.height
+        let height = canvas.height
         context.setFillColor(Palette.color(slide.background).cgColor)
-        context.fill(CGRect(origin: .zero, size: Deck.size))
+        context.fill(CGRect(origin: .zero, size: canvas.size))
         for object in slide.objects {
             let rect = CGRect(x: object.x, y: Double(height) - object.y - object.height,
                               width: object.width, height: object.height)
@@ -90,13 +90,13 @@ enum SlideDrawing {
               let consumer = CGDataConsumer(data: buffer) else {
             throw CocoaError(.fileWriteUnknown)
         }
-        var page = CGRect(origin: .zero, size: Deck.size)
+        var page = CGRect(origin: .zero, size: deck.pageCanvas.size)
         guard let context = CGContext(consumer: consumer, mediaBox: &page, nil) else {
             throw CocoaError(.fileWriteUnknown)
         }
         for (_, slide) in pages {
             context.beginPDFPage(nil)
-            draw(slide, images: deck.images, in: context)
+            draw(slide, images: deck.images, in: context, canvas: deck.pageCanvas)
             context.endPDFPage()
         }
         context.closePDF()

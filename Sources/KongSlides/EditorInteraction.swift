@@ -121,7 +121,7 @@ struct NotesFocusView: View {
             } else {
                 HStack(alignment: .top, spacing: 20) {
                     VStack(alignment: .leading) {
-                        SlideSurface(slide: slide, images: document.deck.images)
+                        SlideSurface(slide: slide, images: document.deck.images, canvas: document.deck.pageCanvas)
                         Text(slide.title).font(.headline)
                         Text(slide.section).foregroundStyle(.secondary)
                     }.frame(width: 250)

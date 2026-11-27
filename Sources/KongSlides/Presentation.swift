@@ -213,7 +213,7 @@ private struct ProjectionView: View {
         ZStack {
             Color.black
             if !session.blackScreen {
-                SlideSurface(slide: session.deck.slides[session.index], images: session.deck.images)
+                SlideSurface(slide: session.deck.slides[session.index], images: session.deck.images, canvas: session.deck.pageCanvas)
                     .overlay { PresentationInk(session: session, interactive: !session.dualScreen) }
             }
         }
@@ -262,7 +262,7 @@ private struct PresenterView: View {
             HStack(alignment: .top, spacing: 16) {
                 VStack(alignment: .leading) {
                     Text("当前页").font(.headline)
-                    SlideSurface(slide: slide, images: session.deck.images)
+                    SlideSurface(slide: slide, images: session.deck.images, canvas: session.deck.pageCanvas)
                         .overlay { PresentationInk(session: session, interactive: true) }
                     HStack {
                         Button("上一页") { session.step(-1) }.disabled(session.sequentialIndex(-1) == nil)
@@ -276,7 +276,7 @@ private struct PresenterView: View {
                 VStack(alignment: .leading) {
                     Text("下一页").font(.headline)
                     if let next = session.sequentialIndex(1) {
-                        SlideSurface(slide: session.deck.slides[next], images: session.deck.images)
+                        SlideSurface(slide: session.deck.slides[next], images: session.deck.images, canvas: session.deck.pageCanvas)
                     } else {
                         Text("已到最后一页").foregroundStyle(.secondary)
                     }

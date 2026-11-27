@@ -30,6 +30,7 @@ struct SlideSurface: View {
     let slide: Slide
     let images: [UUID: Data]
     var omittedObject: UUID? = nil
+    var canvas: SlideCanvas = .widescreen
 
     var body: some View {
         Canvas { graphics, size in
@@ -37,11 +38,11 @@ struct SlideSurface: View {
                 var visible = slide
                 if let omittedObject { visible.objects.removeAll { $0.id == omittedObject } }
                 context.translateBy(x: 0, y: size.height)
-                context.scaleBy(x: size.width / Deck.size.width, y: -size.height / Deck.size.height)
-                SlideDrawing.draw(visible, images: images, in: context)
+                context.scaleBy(x: size.width / canvas.width, y: -size.height / canvas.height)
+                SlideDrawing.draw(visible, images: images, in: context, canvas: canvas)
             }
         }
-        .aspectRatio(16.0 / 9.0, contentMode: .fit)
+        .aspectRatio(canvas.width / canvas.height, contentMode: .fit)
         .accessibilityLabel(slide.title)
     }
 }
@@ -57,6 +58,11 @@ struct EditorView: View {
     @State private var pendingDeletion: Set<UUID> = []
     @State private var notesFocus = false
     @State private var teachingSheet: TeachingSheet?
+    @State private var canvasSheet = false
+    @State private var formatText: SlideObject?
+    @State private var recoverySheet = false
+    @State private var recoveryID = UUID()
+    @State private var recoveryPending: Task<Void, Never>?
     @State private var referencePDF: ReferenceFile?
     @ObservedObject private var templateStore = TeachingTemplateStore.shared
     @AppStorage("speakerNotesFontSize") private var notesFontSize = 16.0
@@ -144,6 +150,7 @@ struct EditorView: View {
                deck.slides.contains(where: { $0.importReport != nil }) {
                 reviewMode = .imported
             }
+            if !sourceIsPowerPoint && RecoverySession.shared.shouldOffer() { recoverySheet = true }
         }
         .task(id: fileURL) {
             if sourceIsPowerPoint && !convertedNativeOpen {
@@ -162,6 +169,40 @@ struct EditorView: View {
         .sheet(isPresented: $notesFocus, onDismiss: { selectedPageIDs = [slide.id] }) {
             NotesFocusView(document: $document, slideID: $slideID, fontSize: $notesFontSize)
         }
+        .background(RecoveryWindowObserver {
+            recoveryPending?.cancel()
+            RecoverySession.shared.close(recoveryID)
+        })
+        .onChange(of: deck) { _, latest in
+            guard !sourceIsPowerPoint else { return }
+            recoveryPending?.cancel()
+            let id = recoveryID
+            let name = documentName
+            recoveryPending = Task { @MainActor in
+                do {
+                    try await Task.sleep(for: .seconds(1))
+                    RecoverySession.shared.write(RecoverySnapshot(savedAt: Date(), name: name, deck: latest), id: id)
+                } catch {}
+            }
+        }
+        .sheet(isPresented: $recoverySheet) {
+            RecoveryBrowser { original, name in
+                var copy = original
+                copy.importedTitle = name + "（恢复）"
+                let fresh = SlidesDocument(deck: copy)
+                newDocument(fresh)
+            }
+        }
+        .sheet(isPresented: $canvasSheet) {
+            CanvasSizeView(deck: deck, slideID: slide.id) { size in document.deck = deck.fitted(to: size) }
+        }
+        .sheet(item: $formatText) { object in
+            TextRunFormatView(object: object) { runs in
+                if let index = slide.objects.firstIndex(where: { $0.id == object.id }) {
+                    document.deck.slides[self.index].objects[index].textRuns = runs.isEmpty ? nil : runs
+                }
+            }
+        }
         .sheet(item: $referencePDF) { reference in
             ReferencePDFView(url: reference.url, deck: deck, selectedSlide: slide.id, replace: replaceWithReference)
         }
@@ -175,7 +216,7 @@ struct EditorView: View {
                 TeachingTemplateView(library: templateStore) { item in
                     var page = item.slide
                     page.section = slide.section
-                    insert(SlideClipboard(slides: [page], images: item.images), at: index + 1, asObject: false)
+                    insert(SlideClipboard(slides: [page], images: item.images, canvas: item.canvas), at: index + 1, asObject: false)
                 }
             }
         }
@@ -235,6 +276,7 @@ struct EditorView: View {
                 Button("查看 PPTX 导入报告") { reviewMode = .imported }
                     .disabled(!deck.slides.contains { $0.importReport != nil })
                 Button("对照原稿 PDF…", action: chooseReferencePDF)
+                Button("课件恢复…") { recoverySheet = true }
                 Divider()
                 Button("导出可编辑 PPTX…") { export(.powerPoint) }
                 Button("导出投影 PDF…") { export(.pdf) }
@@ -342,7 +384,7 @@ struct EditorView: View {
                     Text(row.section).font(.caption.weight(.semibold)).lineLimit(1).foregroundStyle(.secondary)
                 }
             }
-            SlideSurface(slide: row, images: deck.images)
+            SlideSurface(slide: row, images: deck.images, canvas: deck.pageCanvas)
                 .clipShape(.rect(cornerRadius: 4))
                 .overlay(RoundedRectangle(cornerRadius: 4).strokeBorder(.secondary.opacity(0.24)))
                 .accessibilityHidden(true)
@@ -386,13 +428,13 @@ struct EditorView: View {
 
     private var workspace: some View {
         GeometryReader { geometry in
-            let scale = max(0.1, min((geometry.size.width - 48) / Deck.size.width,
-                                     (geometry.size.height - 48) / Deck.size.height))
+            let scale = max(0.1, min((geometry.size.width - 48) / deck.pageCanvas.width,
+                                     (geometry.size.height - 48) / deck.pageCanvas.height))
             ZStack {
                 Color(nsColor: .underPageBackgroundColor)
                     .onTapGesture { focusCanvas(); objectID = nil; editingID = nil }
                 ZStack(alignment: .topLeading) {
-                    SlideSurface(slide: slide, images: deck.images, omittedObject: editingID)
+                    SlideSurface(slide: slide, images: deck.images, omittedObject: editingID, canvas: deck.pageCanvas)
                         .onTapGesture { focusCanvas(); objectID = nil; editingID = nil }
                     ForEach(slide.objects) { object in
                         objectOverlay(object, scale: scale)
@@ -402,12 +444,12 @@ struct EditorView: View {
                         SlideResizeHandles(frame: object.frame, scale: scale, proportional: object.kind == .image) { frame in
                             changeObjectFrame(object.id, to: frame)
                         }
-                        .frame(width: Deck.size.width * scale, height: Deck.size.height * scale)
+                        .frame(width: deck.pageCanvas.width * scale, height: deck.pageCanvas.height * scale)
                         .id(object.id)
                         .zIndex(2)
                     }
                 }
-                .frame(width: Deck.size.width * scale, height: Deck.size.height * scale)
+                .frame(width: deck.pageCanvas.width * scale, height: deck.pageCanvas.height * scale)
                 .clipped()
                 .coordinateSpace(name: "slideCanvas")
                 .shadow(color: .black.opacity(0.15), radius: 12, y: 5)
@@ -435,7 +477,7 @@ struct EditorView: View {
                 .zIndex(1)
         } else {
             ObjectHitArea(object: object, selected: objectID == object.id, scale: scale,
-                          slideBackground: slide.background, images: deck.images,
+                          slideBackground: slide.background, images: deck.images, canvas: deck.pageCanvas,
                           select: { focusCanvas(); objectID = object.id },
                           edit: {
                               focusCanvas()
@@ -483,6 +525,7 @@ struct EditorView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 Text("版面属性").font(.headline)
+                Button("幻灯片尺寸…") { canvasSheet = true }
                 Toggle("备用页", isOn: Binding(get: { slide.isBackup }, set: { setBackup($0, for: [slide.id]) }))
                     .help("顺序放映时跳过，可在放映中手动调出。")
                 TextField("章节名称", text: slideBinding(\.section))
@@ -497,6 +540,7 @@ struct EditorView: View {
                             .frame(height: 82)
                             .border(.secondary.opacity(0.22))
                             .accessibilityLabel("文本框内容")
+                        Button("局部文字格式…") { formatText = object }.disabled(object.text.isEmpty)
                         number("字号", object: object, key: \.fontSize, range: 8...200)
                         Toggle("粗体", isOn: objectBinding(object.id, \.bold, fallback: false))
                         Menu("文字对齐") {
@@ -684,6 +728,7 @@ struct EditorView: View {
 
     private func addSlide(_ newSlide: Slide) {
         var next = newSlide
+        next.objects = next.objects.map { SlideCanvas.widescreen.fitting($0, into: deck.pageCanvas) }
         next.section = slide.section
         document.deck.slides.insert(next, at: index + 1)
         selectPages([next.id])
@@ -715,7 +760,7 @@ struct EditorView: View {
         case "d":
             if pageCommands { duplicateSlides(pages); return true }
             guard let selection else { return false }
-            let box = SlideClipboard(slides: [Slide(objects: [slide.objects[selection]])], images: deck.images)
+            let box = SlideClipboard(slides: [Slide(objects: [slide.objects[selection]])], images: deck.images, canvas: deck.pageCanvas)
             insert(box, at: index, asObject: true)
             return true
         case "a":
@@ -731,11 +776,11 @@ struct EditorView: View {
         let payload: SlideClipboard
         let type: NSPasteboard.PasteboardType
         if pageCommands {
-            payload = SlideClipboard(slides: deck.slides.filter { pages.contains($0.id) }, images: deck.images)
+            payload = SlideClipboard(slides: deck.slides.filter { pages.contains($0.id) }, images: deck.images, canvas: deck.pageCanvas)
             type = Self.pagePasteboard
         } else {
             guard let selection else { return false }
-            payload = SlideClipboard(slides: [Slide(objects: [slide.objects[selection]])], images: deck.images)
+            payload = SlideClipboard(slides: [Slide(objects: [slide.objects[selection]])], images: deck.images, canvas: deck.pageCanvas)
             type = Self.objectPasteboard
         }
         guard let data = try? JSONEncoder().encode(payload) else { return false }
@@ -785,7 +830,7 @@ struct EditorView: View {
     private func duplicateSlides(_ ids: Set<UUID>) {
         let pages = deck.slides.filter { ids.contains($0.id) }
         guard let last = deck.slides.lastIndex(where: { ids.contains($0.id) }) else { return }
-        insert(SlideClipboard(slides: pages, images: deck.images), at: last + 1, asObject: false)
+        insert(SlideClipboard(slides: pages, images: deck.images, canvas: deck.pageCanvas), at: last + 1, asObject: false)
     }
 
     private func deleteSlides(_ ids: Set<UUID>) {
@@ -941,7 +986,7 @@ struct EditorView: View {
                 }
                 var updated = deck
                 let title = url.deletingPathExtension().lastPathComponent
-                updated.slides.append(contentsOf: imported.deck.slides.map { original in
+                updated.slides.append(contentsOf: imported.deck.fitted(to: deck.pageCanvas).slides.map { original in
                     var copy = original
                     copy.section = title
                     return copy
@@ -978,7 +1023,7 @@ struct EditorView: View {
                 var updated = deck
                 let asset = UUID()
                 updated.images[asset] = rendered.0
-                ReferencePDF.replace(&updated.slides[index], with: asset, size: rendered.1)
+                ReferencePDF.replace(&updated.slides[index], with: asset, size: rendered.1, canvas: updated.pageCanvas)
                 document.deck = try updated.validated()
                 search = ""
                 selectPages([slideID])
@@ -1044,7 +1089,7 @@ struct EditorView: View {
         let name = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty else { linkedError = "请输入版式名称。"; return }
         do {
-            try templateStore.save(TeachingTemplate(name: name, slide: slide, images: deck.images))
+            try templateStore.save(TeachingTemplate(name: name, slide: slide, images: deck.images, canvas: deck.pageCanvas))
         } catch { linkedError = "无法保存教学版式。\n\(error.localizedDescription)" }
     }
 
@@ -1183,6 +1228,7 @@ private struct ObjectHitArea: View {
     let scale: CGFloat
     let slideBackground: String
     let images: [UUID: Data]
+    let canvas: SlideCanvas
     let select: () -> Void
     let edit: () -> Void
     let move: (CGSize) -> Void
@@ -1199,10 +1245,10 @@ private struct ObjectHitArea: View {
                         local.x = 0
                         local.y = 0
                         graphics.withCGContext { context in
-                            context.translateBy(x: 0, y: Deck.size.height * scale)
+                            context.translateBy(x: 0, y: canvas.height * scale)
                             context.scaleBy(x: scale, y: -scale)
                             SlideDrawing.draw(Slide(background: slideBackground, objects: [local]),
-                                              images: images, in: context)
+                                              images: images, in: context, canvas: canvas)
                         }
                     }
                     .clipped()

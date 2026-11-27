@@ -59,17 +59,19 @@ enum ResizeCorner: CaseIterable, Hashable {
 struct SlideClipboard: Codable {
     var slides: [Slide]
     var images: [UUID: Data]
+    var canvas: SlideCanvas?
 
-    init(slides: [Slide], images: [UUID: Data]) {
+    init(slides: [Slide], images: [UUID: Data], canvas: SlideCanvas? = nil) {
         self.slides = slides
+        self.canvas = canvas
         let assetIDs = Set(slides.flatMap { $0.objects.compactMap(\.imageID) })
         self.images = images.filter { assetIDs.contains($0.key) }
     }
 
     func validated() throws -> Self {
         guard !slides.isEmpty, slides.count <= 500 else { throw CocoaError(.fileReadCorruptFile) }
-        let value = try Deck(slides: slides, images: images).validated()
-        return Self(slides: value.slides, images: value.images)
+        let value = try Deck(slides: slides, images: images, canvas: canvas).validated()
+        return Self(slides: value.slides, images: value.images, canvas: canvas)
     }
 
     func copies(into deck: inout Deck) -> [Slide] {
@@ -79,12 +81,14 @@ struct SlideClipboard: Codable {
             assetMap[id] = target
             deck.images[target] = data
         }
+        let source = canvas ?? .widescreen
+        let target = deck.pageCanvas
         return slides.map { slide in
             var copy = slide
             copy.id = UUID()
             copy.importReport = nil
             copy.objects = slide.objects.map { object in
-                var result = object
+                var result = source.fitting(object, into: target)
                 result.id = UUID()
                 if let asset = object.imageID { result.imageID = assetMap[asset] ?? asset }
                 return result

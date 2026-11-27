@@ -36,7 +36,7 @@ struct SlideReviewRow: Identifiable {
     }
 
     static func preflight(_ deck: Deck) -> [Self] {
-        let canvas = CGRect(origin: .zero, size: Deck.size).insetBy(dx: -0.1, dy: -0.1)
+        let canvas = CGRect(origin: .zero, size: deck.pageCanvas.size).insetBy(dx: -0.1, dy: -0.1)
         return deck.slides.enumerated().flatMap { index, slide in
             slide.objects.flatMap { object -> [Self] in
                 var rows: [Self] = []

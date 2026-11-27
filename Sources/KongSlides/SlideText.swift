@@ -38,15 +38,17 @@ enum SlideText {
 
     private static func attributed(_ object: SlideObject) -> NSAttributedString {
         let size = CGFloat(object.fontSize)
-        let defaultFont = object.bold ? NSFont.boldSystemFont(ofSize: size) : NSFont.systemFont(ofSize: size)
-        var font = defaultFont
-        if let fontName = object.textLayout?.fontName, let imported = NSFont(name: fontName, size: size) {
-            font = object.bold ? NSFont(descriptor: imported.fontDescriptor.withSymbolicTraits(.bold), size: size) ?? defaultFont : imported
+        func font(_ name: String?, size: CGFloat, bold: Bool) -> NSFont {
+            let fallback = bold ? NSFont.boldSystemFont(ofSize: size) : NSFont.systemFont(ofSize: size)
+            guard let name, let found = NSFont(name: name, size: size) else { return fallback }
+            return bold ? NSFont(descriptor: found.fontDescriptor.withSymbolicTraits(.bold), size: size) ?? fallback : found
         }
+        let baseFont = font(object.textLayout?.fontName, size: size, bold: object.bold)
 
         let result = NSMutableAttributedString(string: "")
         let paragraphs = object.textLayout?.paragraphs ?? []
         let lines = object.text.components(separatedBy: "\n")
+        var offset = 0
         for (index, line) in lines.enumerated() {
             let format = paragraphs.indices.contains(index) ? paragraphs[index] : SlideParagraph()
             let paragraph = NSMutableParagraphStyle()
@@ -76,9 +78,25 @@ enum SlideText {
             } else {
                 prefix = ""
             }
-            result.append(NSAttributedString(string: prefix + line + (index + 1 < lines.count ? "\n" : ""),
-                                             attributes: [.font: font, .foregroundColor: Palette.color(object.color),
-                                                          .paragraphStyle: paragraph]))
+            let base: [NSAttributedString.Key: Any] = [.font: baseFont, .foregroundColor: Palette.color(object.color),
+                                                        .paragraphStyle: paragraph]
+            result.append(NSAttributedString(string: prefix, attributes: base))
+            let end = offset + line.utf16.count
+            for (text, run) in object.textSegments(in: offset..<end) {
+                var attributes = base
+                if let run {
+                    let pointSize = CGFloat(run.size ?? object.fontSize)
+                    attributes[.font] = font(run.fontName ?? object.textLayout?.fontName,
+                                             size: pointSize * (run.baseline == 0 ? 1 : 0.72), bold: run.bold)
+                    attributes[.foregroundColor] = Palette.color(run.color)
+                    attributes[.baselineOffset] = Double(pointSize) * run.baseline
+                }
+                result.append(NSAttributedString(string: text, attributes: attributes))
+            }
+            if index + 1 < lines.count {
+                result.append(NSAttributedString(string: "\n", attributes: base))
+            }
+            offset = end + 1
         }
         return result
     }

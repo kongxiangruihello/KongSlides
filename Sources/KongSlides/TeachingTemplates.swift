@@ -6,9 +6,11 @@ struct TeachingTemplate: Codable, Identifiable {
     var name: String
     var slide: Slide
     var images: [UUID: Data] = [:]
+    var canvas: SlideCanvas?
 
-    init(name: String, slide: Slide, images: [UUID: Data] = [:]) {
+    init(name: String, slide: Slide, images: [UUID: Data] = [:], canvas: SlideCanvas? = nil) {
         self.name = name
+        self.canvas = canvas
         self.slide = slide
         self.slide.section = ""
         self.slide.speakerNotes = ""

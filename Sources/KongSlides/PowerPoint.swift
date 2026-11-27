@@ -59,7 +59,7 @@ enum PowerPoint {
         <p:sldMasterIdLst><p:sldMasterId id="2147483648" r:id="rId1"/></p:sldMasterIdLst>
         <p:notesMasterIdLst><p:notesMasterId r:id="rId2"/></p:notesMasterIdLst>
         <p:sldIdLst>\(slideIDs)</p:sldIdLst>
-        <p:sldSz cx="12192000" cy="6858000" type="screen16x9"/>
+        <p:sldSz cx="\(emu(deck.pageCanvas.width))" cy="\(emu(deck.pageCanvas.height))"/>
         <p:notesSz cx="6858000" cy="9144000"/>
         </p:presentation>
         """
@@ -163,7 +163,7 @@ enum PowerPoint {
         <p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr>
         <p:spPr>\(geometry(object))<a:noFill/><a:ln><a:noFill/></a:ln></p:spPr>
         <p:txBody><a:bodyPr lIns="\(emu(margin.left))" tIns="\(emu(margin.top))" rIns="\(emu(margin.right))" bIns="\(emu(margin.bottom))" wrap="square" anchor="t"><a:noAutofit/></a:bodyPr>
-        <a:lstStyle/>\(paragraphs(object.text, fontSize: object.fontSize, bold: object.bold, color: object.color, layout: object.textLayout))
+        <a:lstStyle/>\(paragraphs(object.text, fontSize: object.fontSize, bold: object.bold, color: object.color, layout: object.textLayout, object: object))
         </p:txBody></p:sp>
         """
     }
@@ -194,27 +194,42 @@ enum PowerPoint {
     }
 
     private static func paragraphs(_ text: String, fontSize: Double, bold: Bool = false,
-                                   color: String = Palette.ink, layout: SlideTextLayout? = nil) -> String {
-        let size = Int((fontSize * 100).rounded())
-        let latin = attribute(layout?.fontName ?? "Arial")
-        let eastAsian = attribute(layout?.fontName ?? "+mn-ea")
-        return text.replacingOccurrences(of: "\r\n", with: "\n")
-            .replacingOccurrences(of: "\r", with: "\n").components(separatedBy: "\n").enumerated().map { index, line in
-                let format = layout?.paragraphs.indices.contains(index) == true
-                    ? layout?.paragraphs[index] ?? SlideParagraph() : SlideParagraph()
-                let paragraph = paragraphXML(format)
-                if line.isEmpty {
-                    return "<a:p>\(paragraph)<a:endParaRPr lang=\"zh-CN\" sz=\"\(size)\"/></a:p>"
-                }
-                let runs = line.components(separatedBy: "\u{2028}").map { segment in
-                    """
-                    <a:r><a:rPr lang="zh-CN" sz="\(size)" b="\(bold ? 1 : 0)">
-                    \(fill(color))<a:latin typeface="\(latin)"/><a:ea typeface="\(eastAsian)"/>
-                    </a:rPr><a:t>\(escaped(segment))</a:t></a:r>
-                    """
-                }.joined(separator: "<a:br/>")
-                return "<a:p>\(paragraph)\(runs)</a:p>"
+                                   color: String = Palette.ink, layout: SlideTextLayout? = nil,
+                                   object: SlideObject? = nil) -> String {
+        let normal = text.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
+        var rich = object
+        if normal != text { rich?.replaceText(with: normal) }
+        var offset = 0
+        func xmlRun(_ text: String, _ style: SlideTextRun?) -> String {
+            let size = Int(((style?.size ?? fontSize) * 100).rounded())
+            let font = style?.fontName ?? layout?.fontName
+            let latin = attribute(font ?? "Arial")
+            let eastAsian = attribute(font ?? "+mn-ea")
+            let baseline = Int(((style?.baseline ?? 0) * 100_000).rounded())
+            let bold = (style?.bold ?? bold) ? 1 : 0
+            return """
+            <a:r><a:rPr lang="zh-CN" sz="\(size)" b="\(bold)" baseline="\(baseline)">
+            \(fill(style?.color ?? color))<a:latin typeface="\(latin)"/><a:ea typeface="\(eastAsian)"/>
+            </a:rPr><a:t>\(escaped(text))</a:t></a:r>
+            """
+        }
+        return normal.components(separatedBy: "\n").enumerated().map { index, line in
+            let format = layout?.paragraphs.indices.contains(index) == true
+                ? layout?.paragraphs[index] ?? SlideParagraph() : SlideParagraph()
+            let paragraph = paragraphXML(format)
+            let start = offset
+            offset += line.utf16.count + 1
+            if line.isEmpty {
+                let size = Int((fontSize * 100).rounded())
+                return "<a:p>\(paragraph)<a:endParaRPr lang=\"zh-CN\" sz=\"\(size)\"/></a:p>"
+            }
+            let parts = rich?.textSegments(in: start..<(offset - 1)) ?? [(line, nil)]
+            let runs = parts.map { content, style in
+                content.components(separatedBy: "\u{2028}").map { $0.isEmpty ? "" : xmlRun($0, style) }
+                    .joined(separator: "<a:br/>")
             }.joined()
+            return "<a:p>\(paragraph)\(runs)</a:p>"
+        }.joined()
     }
 
     private static func paragraphXML(_ format: SlideParagraph) -> String {

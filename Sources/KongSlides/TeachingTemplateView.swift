@@ -27,7 +27,7 @@ struct TeachingTemplateView: View {
                 }
                 .frame(width: 190)
                 if let chosen {
-                    SlideSurface(slide: chosen.slide, images: chosen.images).border(.secondary.opacity(0.2))
+                    SlideSurface(slide: chosen.slide, images: chosen.images, canvas: chosen.canvas ?? .widescreen).border(.secondary.opacity(0.2))
                 }
             }
             if let error { Text(error).foregroundStyle(.red).textSelection(.enabled) }

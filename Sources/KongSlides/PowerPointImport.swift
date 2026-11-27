@@ -45,11 +45,11 @@ extension PowerPoint {
         }
         guard slideIDs.count <= 500 else { throw PowerPointReadError.limit("幻灯片数量（最多 500 页）") }
         progress?(0, slideIDs.count)
-        let factor = min(960 / cx, 540 / cy)
-        let widthInset = (960 - cx * factor) / 2
-        let heightInset = (540 - cy * factor) / 2
+        let factor = min(1 / 12_700.0, 2000 / max(cx, cy))
+        let canvas = SlideCanvas(width: cx * factor, height: cy * factor)
+        guard canvas.isValid else { throw PowerPointReadError.invalidPart(presentationPath) }
         let rootLinks = try archive.links(from: presentationPath)
-        var draft = Deck(slides: [], importedTitle: url.deletingPathExtension().lastPathComponent)
+        var draft = Deck(slides: [], importedTitle: url.deletingPathExtension().lastPathComponent, canvas: canvas)
         var imageIDs: [String: UUID] = [:]
         let source = url.lastPathComponent
 
@@ -103,7 +103,7 @@ extension PowerPoint {
             let backgroundColor = background?.child("bgPr").flatMap { context.color($0) }
             var slide = Slide(background: backgroundColor ?? "FFFFFF")
             if ["0", "false"].contains(xml.value("show") ?? "") { slide.hiddenInShow = true }
-            if abs(cx / cy - 16.0 / 9.0) > 0.002 { note(.canvas, "源页面按比例放入 16∶9 画布。") }
+            if factor < 1 / 12_700.0 { note(.canvas, "源页面超过尺寸上限，已等比缩小。") }
             if background != nil && backgroundColor == nil {
                 note(.background, "本页使用了渐变、图片或主题背景，已改用白色。")
             }
@@ -147,8 +147,8 @@ extension PowerPoint {
                    let width = extent?.number("cx"), let height = extent?.number("cy"),
                    abs(x * factor) <= 9_000, abs(y * factor) <= 9_000,
                    width > 0, width * factor <= 10_000, height > 0, height * factor <= 10_000 {
-                    object.x = x * factor + widthInset
-                    object.y = y * factor + heightInset
+                    object.x = x * factor
+                    object.y = y * factor
                     object.width = max(1, width * factor)
                     object.height = max(1, height * factor)
                     hasGeometry = true
@@ -236,7 +236,12 @@ extension PowerPoint {
                     object.bold = imported.bold
                     object.color = imported.color
                     object.textLayout = imported.layout
-                    if let font = imported.layout.fontName, fontAvailable?(font) == false {
+                    if let first = imported.runs.first,
+                       first.baseline != 0 || imported.runs.contains(where: { !$0.matchesStyle(first) }) {
+                        object.textRuns = imported.runs
+                    }
+                    let fonts = Set(imported.runs.compactMap(\.fontName)).sorted()
+                    for font in fonts where fontAvailable?(font) == false {
                         note(.font, "「\(label)」使用了本机缺少的字体「\(font)」，显示时使用系统替代字体。", object: object.id)
                     }
                     if imported.mixed {

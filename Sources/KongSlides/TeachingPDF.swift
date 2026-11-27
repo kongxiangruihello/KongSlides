@@ -35,7 +35,7 @@ enum TeachingPDF {
         do {
             switch format {
             case .teacher: try teacher(deck, in: context)
-            case .studentTwo, .studentThree: student(pages, images: deck.images, perPage: format.slidesPerPage, in: context)
+            case .studentTwo, .studentThree: student(pages, images: deck.images, canvas: deck.pageCanvas, perPage: format.slidesPerPage, in: context)
             }
         } catch {
             context.closePDF()
@@ -92,7 +92,8 @@ enum TeachingPDF {
                 heading("教师讲稿", detail: "幻灯片 \(index + 1) · \(slide.title)" + (slide.isBackup ? " · 备用页" : "") + (first ? "" : " · 续页"),
                         page: pages, in: context)
                 if first {
-                    thumbnail(slide, images: deck.images, at: CGPoint(x: margin, y: 554), width: 340, in: context)
+                    thumbnail(slide, images: deck.images, in: CGRect(x: margin, y: 554, width: 340, height: 192),
+                              canvas: deck.pageCanvas, context: context)
                     label("逐字讲稿", at: CGPoint(x: margin, y: 528), fontSize: 13, bold: true, in: context)
                 }
                 let frame = CGRect(x: margin, y: 52, width: paper.width - 2 * margin, height: first ? 458 : 700)
@@ -121,7 +122,7 @@ enum TeachingPDF {
         context.restoreGState()
     }
 
-    private static func student(_ pages: [(offset: Int, element: Slide)], images: [UUID: Data],
+    private static func student(_ pages: [(offset: Int, element: Slide)], images: [UUID: Data], canvas: SlideCanvas,
                                 perPage: Int, in context: CGContext) {
         let rowHeight = 710.0 / Double(perPage)
         for first in stride(from: 0, to: pages.count, by: perPage) {
@@ -132,10 +133,12 @@ enum TeachingPDF {
             for (position, page) in chunk.enumerated() {
                 let top = 752 - Double(position) * rowHeight
                 let width = 309.0
-                let bottom = top - 26 - width * Deck.size.height / Deck.size.width
+                let height = min(180, rowHeight - 42)
+                let bottom = top - 26 - height
                 label("幻灯片 \(page.offset + 1)", at: CGPoint(x: margin, y: top - 14),
                       fontSize: 11, bold: true, in: context)
-                thumbnail(page.element, images: images, at: CGPoint(x: margin, y: bottom), width: width, in: context)
+                thumbnail(page.element, images: images, in: CGRect(x: margin, y: bottom, width: width, height: height),
+                          canvas: canvas, context: context)
                 let left = margin + width + 18
                 label("课堂笔记", at: CGPoint(x: left, y: top - 14), fontSize: 11, bold: true, in: context)
                 for row in 1...7 {
@@ -158,15 +161,16 @@ enum TeachingPDF {
               fontSize: 10, bold: false, in: context)
     }
 
-    private static func thumbnail(_ slide: Slide, images: [UUID: Data], at point: CGPoint,
-                                  width: CGFloat, in context: CGContext) {
-        let scale = width / Deck.size.width
-        let frame = CGRect(origin: point, size: CGSize(width: width, height: Deck.size.height * scale))
+    private static func thumbnail(_ slide: Slide, images: [UUID: Data], in bounds: CGRect,
+                                  canvas: SlideCanvas, context: CGContext) {
+        let scale = min(bounds.width / canvas.width, bounds.height / canvas.height)
+        let frame = CGRect(x: bounds.minX, y: bounds.maxY - canvas.height * scale,
+                           width: canvas.width * scale, height: canvas.height * scale)
         context.saveGState()
         context.clip(to: frame)
-        context.translateBy(x: point.x, y: point.y)
+        context.translateBy(x: frame.minX, y: frame.minY)
         context.scaleBy(x: scale, y: scale)
-        SlideDrawing.draw(slide, images: images, in: context)
+        SlideDrawing.draw(slide, images: images, in: context, canvas: canvas)
         context.restoreGState()
         context.setStrokeColor(ruleColor.cgColor)
         context.setLineWidth(0.5)

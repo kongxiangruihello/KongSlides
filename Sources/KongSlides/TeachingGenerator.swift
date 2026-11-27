@@ -39,7 +39,7 @@ enum TeachingGenerator {
             }
             ranges[draft.id] = start..<pages.count
         }
-        return Layout(clipboard: SlideClipboard(slides: pages, images: template.images), ranges: ranges)
+        return Layout(clipboard: SlideClipboard(slides: pages, images: template.images, canvas: template.canvas), ranges: ranges)
     }
 
     private static func populated(_ draft: TeachingDraft, title: String, body: String, notes: String,

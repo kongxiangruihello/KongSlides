@@ -103,11 +103,13 @@ struct SlideObject: Codable, Identifiable, Equatable {
     var color = Palette.ink
     var imageID: UUID?
     var textLayout: SlideTextLayout?
+    var textRuns: [SlideTextRun]?
     var pictureCrop: PictureCrop?
 
     var frame: CGRect { CGRect(x: x, y: y, width: width, height: height) }
 
     mutating func replaceText(with value: String) {
+        remapTextRuns(to: value)
         defer { text = value }
         guard var layout = textLayout, !layout.paragraphs.isEmpty else { return }
         let old = text.components(separatedBy: "\n")
@@ -173,11 +175,12 @@ struct Slide: Codable, Identifiable, Equatable {
 }
 
 struct Deck: Codable, Equatable {
-    static let size = CGSize(width: 960, height: 540)
+    static let size = SlideCanvas.widescreen.size
     var schemaVersion = 1
     var slides: [Slide] = [Slide.titleSlide("新建课件", subtitle: "双击文字开始编辑")]
     var images: [UUID: Data] = [:]
     var importedTitle: String?
+    var canvas: SlideCanvas?
 
     func firstPresentationIndex(at startingIndex: Int) -> Int? {
         guard !slides.isEmpty else { return nil }
@@ -203,7 +206,7 @@ struct Deck: Codable, Equatable {
     }
 
     func validated() throws -> Deck {
-        guard schemaVersion == 1 else { throw CocoaError(.fileReadUnknown) }
+        guard schemaVersion == 1, canvas?.isValid != false else { throw CocoaError(.fileReadUnknown) }
         var result = self
         if result.slides.isEmpty { result.slides = [Slide()] }
         guard Set(result.slides.map(\.id)).count == result.slides.count else {
@@ -217,7 +220,7 @@ struct Deck: Codable, Equatable {
             for object in slide.objects {
                 guard abs(object.x) <= 10_000, abs(object.y) <= 10_000,
                       (1...10_000).contains(object.width), (1...10_000).contains(object.height),
-                      (8...200).contains(object.fontSize), object.textLayout?.isValid != false, object.pictureCrop?.isValid != false else {
+                      (8...200).contains(object.fontSize), object.textLayout?.isValid != false, object.pictureCrop?.isValid != false, object.validTextRuns else {
                     throw CocoaError(.fileReadCorruptFile)
                 }
                 if object.kind == .image {

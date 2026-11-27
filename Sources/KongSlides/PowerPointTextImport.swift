@@ -108,6 +108,7 @@ struct ImportedText {
     var bold = false
     var color = Palette.ink
     var mixed = false
+    var runs: [SlideTextRun] = []
     var approximateParagraph = false
 
     init(body: XMLElement, shape: XMLElement, ancestry: [XMLElement], context: PowerPointLayout, unit: Double,
@@ -129,16 +130,19 @@ struct ImportedText {
         var numbering: [Int: (number: Int, rule: String)] = [:]
         var hasLeadingStyle = false
 
+        var offset = 0
         for paragraph in body.children(named: "p") {
             let local = paragraph.child("pPr")
             let level = Int(min(8, max(0, local?.number("lvl") ?? 0)))
             var inheritance = context.defaultText(for: shape, ancestry: ancestry, level: level)
             if let local { inheritance.insert(local, at: 0) }
             let defaults = inheritance.compactMap { $0.child("defRPr") }
-            let items = paragraph.elementChildren.filter { ["r", "fld"].contains($0.localName ?? "") }
-            for item in items {
+            for item in paragraph.elementChildren {
+                if item.localName == "br" { offset += 1; continue }
                 let text = item.child("t")?.stringValue ?? ""
                 guard !text.isEmpty else { continue }
+                let length = text.utf16.count
+                defer { offset += length }
                 let applied = [item.child("rPr")].compactMap { $0 } + defaults
                 let pointSize = applied.lazy.compactMap { $0.number("sz") }.first.map { min(200, max(8, $0 * 127 * unit)) }
                 let weight = ["1", "true"].contains(applied.lazy.compactMap { $0.value("b") }.first ?? "")
@@ -151,9 +155,15 @@ struct ImportedText {
                     color = rgb
                     layout.fontName = font
                     hasLeadingStyle = true
-                } else if size != pointSize || bold != weight || color != rgb ||
-                            (layout.fontName != nil && font != nil && layout.fontName != font) {
-                    mixed = true
+                }
+                let baseline = applied.lazy.compactMap { $0.number("baseline") }.first ?? 0
+                let color = rgb.utf8.count == 6 && Int(rgb, radix: 16) != nil ? rgb : Palette.ink
+                let run = SlideTextRun(start: offset, length: length, size: pointSize, bold: weight,
+                                       color: color, fontName: font, baseline: min(1, max(-1, baseline / 100_000)))
+                if let last = runs.indices.last, runs[last].end == offset, runs[last].matchesStyle(run) {
+                    runs[last].length += length
+                } else {
+                    runs.append(run)
                 }
                 if applied.contains(where: { $0.value("i") == "1" || $0.value("u").map { $0 != "none" } == true ||
                     $0.child("hlinkClick") != nil }) {
@@ -165,6 +175,7 @@ struct ImportedText {
                 }
             }
 
+            offset += 1
             var format = SlideParagraph()
             switch inheritance.lazy.compactMap({ $0.value("algn") }).first {
             case "ctr": format.alignment = .center
