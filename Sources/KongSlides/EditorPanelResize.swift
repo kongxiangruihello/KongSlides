@@ -44,35 +44,85 @@ struct EditorPanelWidths {
     }
 }
 
-struct EditorPanelResizeHandle: View {
+struct EditorPanelResizeHandle: NSViewRepresentable {
     let title: String
     let identifier: String
-    let translation: GestureState<Double>
+    @Binding var translation: Double
     let resize: (Double) -> Void
-    @State private var hovering = false
 
-    var body: some View {
-        Rectangle()
-            .fill(hovering || translation.wrappedValue != 0 ? Color.accentColor : Color(nsColor: .separatorColor))
-            .frame(width: hovering || translation.wrappedValue != 0 ? 2 : 1)
-            .frame(width: EditorPanelWidths.dividerWidth)
-            .frame(maxHeight: .infinity)
-            .contentShape(Rectangle())
-            .help(title)
-            .gesture(DragGesture(minimumDistance: 0, coordinateSpace: .global)
-                .updating(translation) { value, live, _ in live = value.translation.width }
-                .onEnded { value in
-                    if value.translation.width != 0 { resize(value.translation.width) }
-                })
-            .onHover { inside in
-                hovering = inside
-                if inside { NSCursor.resizeLeftRight.set() } else { NSCursor.arrow.set() }
-            }
-            .onDisappear {
-                if hovering { NSCursor.arrow.set() }
-            }
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel(title)
-            .accessibilityIdentifier(identifier)
+    func makeNSView(context: Context) -> DividerView {
+        let view = DividerView()
+        view.toolTip = title
+        view.setAccessibilityElement(true)
+        view.setAccessibilityRole(.splitter)
+        view.setAccessibilityLabel(title)
+        view.setAccessibilityIdentifier(identifier)
+        return view
+    }
+
+    func updateNSView(_ view: DividerView, context: Context) {
+        view.onDrag = { translation = $0 }
+        view.onCommit = { offset in
+            if offset != 0 { resize(offset) }
+            translation = 0
+        }
+    }
+
+    final class DividerView: NSView {
+        var onDrag: ((Double) -> Void)?
+        var onCommit: ((Double) -> Void)?
+        private var startX: CGFloat?
+        private var hovering = false
+        private var tracking: NSTrackingArea?
+
+        override func updateTrackingAreas() {
+            super.updateTrackingAreas()
+            if let tracking { removeTrackingArea(tracking) }
+            let area = NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
+                                      owner: self, userInfo: nil)
+            addTrackingArea(area)
+            tracking = area
+        }
+
+        override func resetCursorRects() {
+            super.resetCursorRects()
+            addCursorRect(bounds, cursor: .resizeLeftRight)
+        }
+
+        override func mouseEntered(with event: NSEvent) {
+            hovering = true
+            needsDisplay = true
+        }
+
+        override func mouseExited(with event: NSEvent) {
+            hovering = false
+            needsDisplay = true
+        }
+
+        override func mouseDown(with event: NSEvent) {
+            startX = event.locationInWindow.x
+            needsDisplay = true
+        }
+
+        override func mouseDragged(with event: NSEvent) {
+            guard let startX else { return }
+            onDrag?(event.locationInWindow.x - startX)
+        }
+
+        override func mouseUp(with event: NSEvent) {
+            guard let startX else { return }
+            self.startX = nil
+            hovering = bounds.contains(convert(event.locationInWindow, from: nil))
+            onCommit?(event.locationInWindow.x - startX)
+            needsDisplay = true
+        }
+
+        override func draw(_ dirtyRect: NSRect) {
+            let active = hovering || startX != nil
+            let thickness: CGFloat = active ? 2 : 1
+            (active ? NSColor.controlAccentColor : .separatorColor).setFill()
+            NSBezierPath(rect: NSRect(x: bounds.midX - thickness / 2, y: bounds.minY,
+                                      width: thickness, height: bounds.height)).fill()
+        }
     }
 }

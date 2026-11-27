@@ -104,8 +104,8 @@ struct EditorView: View {
     @AppStorage("showLayoutInspector") private var showInspector = true
     @AppStorage("sidebarWidth") private var sidebarWidth = 206.0
     @AppStorage("inspectorWidth") private var inspectorWidth = 230.0
-    @GestureState private var sidebarDrag = 0.0
-    @GestureState private var inspectorDrag = 0.0
+    @State private var sidebarDrag = 0.0
+    @State private var inspectorDrag = 0.0
     @State private var search = ""
     @State private var presenter = PresentationController()
 
@@ -360,6 +360,9 @@ struct EditorView: View {
                     let width = widths.width(.left, translation: offset)
                     if width != widths.left { sidebarWidth = width }
                 }
+                .frame(width: EditorPanelWidths.dividerWidth)
+                .frame(maxHeight: .infinity)
+                .zIndex(1)
                 VStack(spacing: 0) {
                     workspace
                     if showNotes {
@@ -377,6 +380,9 @@ struct EditorView: View {
                         let width = widths.width(.right, translation: offset)
                         if width != widths.right { inspectorWidth = width }
                     }
+                    .frame(width: EditorPanelWidths.dividerWidth)
+                    .frame(maxHeight: .infinity)
+                    .zIndex(1)
                     inspector.frame(width: widths.width(.right, translation: inspectorDrag))
                 }
             }
