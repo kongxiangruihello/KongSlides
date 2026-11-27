@@ -77,27 +77,19 @@ click(awaitElement("编号") { located("编号") })
 print("Editor toolbar exposes Import, Export and Properties, and the numbering button was clicked on a text object.")
 key(53)
 key(1, flags: [.maskCommand, .maskShift])
-let dialog = awaitElement("Save As sheet") { sheet() }
-let formats = awaitElement("保存格式") {
-    located("保存格式", from: dialog) ?? find(dialog) { item in
-        get(item, kAXRoleAttribute) as? String == kAXPopUpButtonRole &&
-            (get(item, kAXValueAttribute) as? String)?.contains("KongSlides") == true
-    }
+let picker = awaitElement("save format chooser") {
+    guard let front = sheet(), located("选择另存为格式", from: front) != nil else { return nil }
+    return front
 }
-click(formats)
-if let pptx = located("PowerPoint 演示文稿（.pptx）") {
-    if AXUIElementPerformAction(pptx, kAXPressAction as CFString) != .success {
-        key(125)
-        key(36)
-    }
-} else {
-    key(125)
-    key(36)
+let option = awaitElement("PowerPoint format button") {
+    located("PowerPoint 演示文稿（.pptx）", from: picker)
 }
-_ = awaitElement("PPTX selected") {
-    ((get(formats, kAXValueAttribute) as? String)?.contains("PowerPoint") == true ||
-        (get(formats, kAXTitleAttribute) as? String)?.contains("PowerPoint") == true) ? formats : nil
+click(option)
+let dialog = awaitElement("PPTX Save As sheet after choosing a format") {
+    guard let front = sheet(), find(front, { get($0, kAXRoleAttribute) as? String == kAXTextFieldRole }) != nil else { return nil }
+    return front
 }
+print("PowerPoint format selection opened its native Save As sheet.")
 func describe(_ item: AXUIElement, depth: Int = 0) {
     let fields = [kAXRoleAttribute, kAXTitleAttribute, kAXDescriptionAttribute, kAXValueAttribute,
                   kAXEnabledAttribute].compactMap { get(item, $0) }.map { String(describing: $0) }
