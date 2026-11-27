@@ -1,0 +1,50 @@
+name: KongSlides 0.2.21 mouse resize verification
+on:
+  push:
+    branches: [codex/kongslides-0.2.21-desktop]
+    paths: [.github/workflows/verify-0.2.21-desktop.yml, Scripts/verify-0.2.21-resize.swift]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  mouse:
+    runs-on: macos-15
+    timeout-minutes: 12
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      BUILD_RUN: "46078364022"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download the tested candidate
+        run: |
+          gh run watch "$BUILD_RUN" --exit-status --interval 4
+          gh run download "$BUILD_RUN" --name KongSlides-macOS-preview --dir candidate
+          ditto -x -k candidate/KongSlides-macOS-preview.zip candidate
+      - name: Drag both panel dividers in both directions
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="$(mktemp -d)"
+          app="$PWD/candidate/KongSlides.app"
+          defaults write com.kongslides.app checkForUpdatesAutomatically -bool false
+          cat > "$root/Classroom.kongslides" <<'JSON'
+          {"schemaVersion":1,"slides":[{"id":"4BF6459E-819C-440E-A535-29DE239F51B1","section":"Classroom","background":"F8F5EE","speakerNotes":"Test","objects":[]}],"images":[]}
+          JSON
+          swiftc Scripts/verify-0.2.21-resize.swift -o "$root/resize-test"
+          open -n -a "$app" "$root/Classroom.kongslides"
+          pid=""
+          for _ in {1..20}; do
+            pid="$(pgrep -nf "$app/Contents/MacOS/KongSlides" || true)"
+            [[ -n "$pid" ]] && break
+            sleep 1
+          done
+          [[ -n "$pid" ]]
+          "$root/resize-test" "$pid"
+          python3 - <<'PY'
+          import subprocess
+          for key, expected in [("sidebarWidth", 251), ("inspectorWidth", 270)]:
+              actual = float(subprocess.check_output(["defaults", "read", "com.kongslides.app", key]))
+              assert abs(actual - expected) < 5, (key, actual)
+              print(f"The app stored {key} at {actual} points.")
+          PY
