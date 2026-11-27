@@ -4,6 +4,7 @@ import SwiftUI
 struct SlideOverview: View {
     let deck: Deck
     let current: UUID
+    let imageCache: SlideImageCache
     let open: (UUID) -> Void
     let reorder: (UUID, UUID) -> Bool
     let setBackup: (Bool, Set<UUID>) -> Void
@@ -29,7 +30,7 @@ struct SlideOverview: View {
                     ForEach(Array(deck.slides.enumerated()), id: \.element.id) { index, slide in
                         Button { select(slide.id) } label: {
                             VStack(alignment: .leading, spacing: 5) {
-                                SlideSurface(slide: slide, images: deck.images, canvas: deck.pageCanvas)
+                                SlideSurface(slide: slide, images: deck.images, canvas: deck.pageCanvas, imageCache: imageCache, thumbnail: true)
                                 Text("\(index + 1)  \(slide.title)" + (slide.isBackup ? " · 备用" : ""))
                                     .font(.caption).lineLimit(1)
                             }

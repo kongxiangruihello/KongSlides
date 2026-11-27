@@ -21,6 +21,7 @@ struct NativeDocumentStamp: Equatable, Sendable {
 private struct OpenedDeck {
     let deck: Deck
     var stamp: NativeDocumentStamp? = nil
+    var imagePreparation = 0.0
 }
 
 private enum NativeDocumentChanged: LocalizedError {
@@ -36,6 +37,7 @@ final class EditorFileSession {
     private(set) var identity = UUID()
     private(set) var activePageID: UUID?
     private(set) var opening = false
+    private(set) var openTiming: OpenTiming?
     private(set) var progress = ImportProgress()
     var error: String?
     var pageJumpRequest = UUID()
@@ -97,6 +99,7 @@ final class EditorFileSession {
               discardEditsToReload || url.standardizedFileURL != fileURL?.standardizedFileURL else { return }
         cancelOpening()
         let request = UUID()
+        let requestedAt = OpenTiming.now
         operation = request
         opening = true
         error = nil
@@ -111,28 +114,45 @@ final class EditorFileSession {
                 guard stamp == NativeDocumentStamp(at: url) else { throw NativeDocumentChanged.externalModification }
                 return OpenedDeck(deck: opened.deck, stamp: stamp)
             }
-            let imported = try PowerPoint.readForEditor(url) { completed, total in
+            var imagePreparation = 0.0
+            let imported = try PowerPoint.readForEditor(url, imageTime: { imagePreparation += $0 }) { completed, total in
                 Task { @MainActor in
                     progress.completed = max(progress.completed, completed)
                     progress.total = total
                 }
             }
-            return OpenedDeck(deck: imported.deck)
+            return OpenedDeck(deck: imported.deck, imagePreparation: imagePreparation)
         }
         reader = work
         Task {
             defer { if operation == request { cancelOpening() } }
             do {
                 let opened = try await work.value
+                let loadedAt = OpenTiming.now
                 guard operation == request, !work.isCancelled else { return }
                 let destination = url.pathExtension.lowercased() == "kongslides" ? url : nil
                 guard (discardEditsToReload || confirmReplacement()), operation == request, !work.isCancelled else { return }
                 install(opened.deck, at: destination, markEdited: false, stamp: opened.stamp)
+                openTiming = OpenTiming(fileName: url.lastPathComponent, pageCount: opened.deck.slides.count,
+                                        requestedAt: requestedAt,
+                                        readAndConvert: max(0, loadedAt - requestedAt - opened.imagePreparation),
+                                        imagePreparation: opened.imagePreparation, uiInstalledAt: OpenTiming.now)
                 NSDocumentController.shared.noteNewRecentDocumentURL(url)
             } catch {
                 guard operation == request, !work.isCancelled else { return }
                 self.error = "无法打开「\(url.lastPathComponent)」。\n\(error.localizedDescription)"
             }
+        }
+    }
+
+    func recordFirstDraw(for editor: UUID, at time: Double, imageTime: Double) {
+        guard editor == identity, let timing = openTiming, timing.firstDraw == nil,
+              time >= timing.uiInstalledAt else { return }
+        openTiming?.firstDraw = time - timing.uiInstalledAt
+        openTiming?.displayImagePreparation = imageTime
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.identity == editor else { return }
+            self.openTiming?.readyAfterDraw = OpenTiming.now - timing.requestedAt
         }
     }
 
@@ -167,6 +187,7 @@ final class EditorFileSession {
         let remembered = url.flatMap { positions.page(for: $0) }
         activePageID = deck.slides.first(where: { $0.id == remembered })?.id ?? deck.slides.first?.id
         savedDeck = markEdited ? nil : deck
+        openTiming = nil
         error = nil
         identity = UUID()
         statusChanged?()

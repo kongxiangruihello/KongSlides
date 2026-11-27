@@ -94,10 +94,32 @@ struct SlideReviewRow: Identifiable {
     }
 }
 
+struct ImportReviewSummary {
+    let total: Int
+    let readable: Int
+    let repaired: Int
+    let pending: [SlideReviewRow]
+
+    init(total: Int, rows: [SlideReviewRow]) {
+        let failures = rows.filter { $0.impact == .pageUnavailable }.sorted { $0.page < $1.page }
+        var seen = Set<UUID>()
+        let pages = failures.filter { seen.insert($0.slideID).inserted }
+        self.total = total
+        readable = max(0, total - pages.count)
+        repaired = pages.count(where: { $0.repair != nil })
+        pending = pages.filter { $0.repair == nil }
+    }
+
+    func next(after page: Int) -> SlideReviewRow? {
+        pending.first { $0.page > page } ?? pending.first
+    }
+}
+
 struct SlideReviewPanel: View {
     let mode: SlideReviewMode
     let rows: [SlideReviewRow]
     let pageCount: Int
+    let currentPage: Int
     let checking: Bool
     let refresh: () -> Void
     let compare: () -> Void
@@ -109,6 +131,7 @@ struct SlideReviewPanel: View {
 
     @State private var impactFilter: ImportDiagnostic.Impact?
     @State private var includeProcessed = false
+    private var summary: ImportReviewSummary { ImportReviewSummary(total: pageCount, rows: rows) }
     private var filteredRows: [SlideReviewRow] {
         mode == .imported && !includeProcessed ? rows.filter { $0.repair == nil } : rows
     }
@@ -149,15 +172,20 @@ struct SlideReviewPanel: View {
                     }
                     .fixedSize()
                     Toggle("显示已处理", isOn: $includeProcessed)
-                    let unavailable = Set(rows.filter { $0.impact == .pageUnavailable && $0.repair == nil }.map(\.slideID)).count
-                    if unavailable > 0 {
-                        Text("\(unavailable) 页待修复")
-                            .font(.caption).foregroundStyle(.secondary)
-                        Button("首个失败页") {
-                            if let first = rows.first(where: { $0.impact == .pageUnavailable && $0.repair == nil }) { reveal(first) }
+                    Spacer(minLength: 0)
+                }
+            }
+            if mode == .imported {
+                HStack(spacing: 10) {
+                    Text("共 \(summary.total) 页 · 已读 \(summary.readable) · 已修复 \(summary.repaired) · 待修复 \(summary.pending.count)")
+                        .font(.caption).foregroundStyle(.secondary).monospacedDigit()
+                    Spacer(minLength: 0)
+                    if let first = summary.pending.first {
+                        Button("首个失败页") { reveal(first) }
+                        Button("处理下一页…") {
+                            if let next = summary.next(after: currentPage) { repair(next) }
                         }
                     }
-                    Spacer(minLength: 0)
                 }
             }
             if shownRows.isEmpty {
@@ -213,7 +241,7 @@ struct SlideReviewPanel: View {
             }
         }
         .padding(11)
-        .frame(height: mode == .imported ? 192 : 168)
+        .frame(height: mode == .imported ? 220 : 168)
         .background(Color(nsColor: .controlBackgroundColor))
     }
 }

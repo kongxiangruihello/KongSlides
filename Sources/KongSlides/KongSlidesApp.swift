@@ -21,16 +21,30 @@ struct SlideSurface: View {
     let images: [UUID: Data]
     var omittedObject: UUID? = nil
     var canvas: SlideCanvas = .widescreen
+    var imageCache: SlideImageCache? = nil
+    var thumbnail = false
+    var didDraw: ((Double, Double) -> Void)? = nil
 
     var body: some View {
-        Canvas { graphics, size in
+        Canvas(rendersAsynchronously: thumbnail) { graphics, size in
+            guard size.width > 0, size.height > 0 else { return }
+            var imageTime = 0.0
             graphics.withCGContext { context in
                 var visible = slide
                 if let omittedObject { visible.objects.removeAll { $0.id == omittedObject } }
                 context.translateBy(x: 0, y: size.height)
                 context.scaleBy(x: size.width / canvas.width, y: -size.height / canvas.height)
-                SlideDrawing.draw(visible, images: images, in: context, canvas: canvas)
+                SlideDrawing.draw(visible, images: images, in: context, canvas: canvas,
+                                  cachedPicture: imageCache.map { cache in
+                    { data, id in
+                        let start = OpenTiming.now
+                        let image = cache.picture(data, id: id, thumbnail: thumbnail)
+                        imageTime += OpenTiming.now - start
+                        return image
+                    }
+                })
             }
+            didDraw?(OpenTiming.now, imageTime)
         }
         .aspectRatio(canvas.width / canvas.height, contentMode: .fit)
         .accessibilityLabel(slide.title)
@@ -42,6 +56,8 @@ struct EditorView: View {
     let session: EditorFileSession
     let documentIdentity: UUID
     @State private var slideID: UUID?
+    @State private var imageCache = SlideImageCache()
+    @State private var showOpenTiming = false
     @State private var selectedPageIDs: Set<UUID> = []
     @State private var pageSelectionAnchor: UUID?
     @State private var pageToReveal: UUID?
@@ -88,6 +104,16 @@ struct EditorView: View {
     @State private var search = ""
     @State private var presenter = PresentationController()
     @FocusState private var canvasTextFocused: Bool
+
+    init(document: Binding<SlidesDocument>, session: EditorFileSession, documentIdentity: UUID) {
+        _document = document
+        self.session = session
+        self.documentIdentity = documentIdentity
+        let page = session.activePageID
+        _slideID = State(initialValue: page)
+        _selectedPageIDs = State(initialValue: page.map { [$0] } ?? [])
+        _pageSelectionAnchor = State(initialValue: page)
+    }
 
     private var deck: Deck { document.deck }
     private var index: Int { deck.slides.firstIndex { $0.id == slideID } ?? 0 }
@@ -148,13 +174,7 @@ struct EditorView: View {
         .background(Color(nsColor: .windowBackgroundColor))
         .background(EditorKeyMonitor(handle: handleShortcut))
         .onAppear {
-            if slideID == nil, session.identity == documentIdentity,
-               let page = session.activePageID, deck.slides.contains(where: { $0.id == page }) {
-                slideID = page
-                selectedPageIDs = [page]
-                pageSelectionAnchor = page
-                if deck.slides.first?.id != page { pageToReveal = page }
-            }
+            if deck.slides.first?.id != slideID { pageToReveal = slideID }
             if deck.importedTitle != nil && deck.slides.contains(where: { $0.importReport != nil }) {
                 reviewMode = .imported
             }
@@ -195,8 +215,16 @@ struct EditorView: View {
                 }
             }
         }
+        .sheet(isPresented: $showOpenTiming) {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("课件打开耗时").font(.headline)
+                Text(session.openTiming?.report ?? "尚无打开记录。").monospacedDigit().textSelection(.enabled)
+                Button("关闭") { showOpenTiming = false }.keyboardShortcut(.cancelAction)
+            }
+            .padding(18).frame(minWidth: 440)
+        }
         .sheet(isPresented: $overviewSheet) {
-            SlideOverview(deck: deck, current: slide.id, open: { id in
+            SlideOverview(deck: deck, current: slide.id, imageCache: imageCache, open: { id in
                 search = ""
                 selectPages([id])
             }, reorder: reorderOverviewPage, setBackup: setBackup)
@@ -345,6 +373,7 @@ struct EditorView: View {
             } label: { Label("讲稿", systemImage: showNotes ? "note.text.badge.minus" : "note.text") }
             Menu {
                 Button("打开课件…") { session.chooseFile() }.disabled(importing || session.opening)
+                Button("查看打开耗时…") { showOpenTiming = true }.disabled(session.openTiming == nil)
                 Button("追加 PPTX 页面到当前课件…") { importPowerPoint() }.disabled(importing || session.opening)
                 Button("查看 PPTX 导入报告") { reviewMode = .imported }
                     .disabled(!deck.slides.contains { $0.importReport != nil })
@@ -406,6 +435,7 @@ struct EditorView: View {
             .padding(.horizontal, 12)
             TextField("搜索标题、正文或讲稿", text: $search)
                 .textFieldStyle(.roundedBorder)
+                .accessibilityIdentifier("sidebar-search")
                 .padding(.horizontal, 12)
             ScrollViewReader { scroll in
                 List {
@@ -415,6 +445,7 @@ struct EditorView: View {
                     .onMove(perform: search.isEmpty && collapsedSections.isEmpty ? reorder : nil)
                 }
                 .listStyle(.sidebar)
+                .accessibilityIdentifier("sidebar-list")
                 .onChange(of: pageToReveal) { _, target in
                     guard let target else { return }
                     if let range = sectionRange(target) {
@@ -465,13 +496,15 @@ struct EditorView: View {
                         Label(row.section, systemImage: collapsedSections.contains(row.id) ? "chevron.right" : "chevron.down")
                             .font(.caption.weight(.semibold)).lineLimit(1)
                     }.buttonStyle(.plain)
+                    .accessibilityIdentifier("sidebar-section-" + row.id.uuidString)
                 } else {
                     Text(row.section).font(.caption.weight(.semibold)).lineLimit(1).foregroundStyle(.secondary)
                 }
             }
             Button { chooseSidebarPage(row.id) } label: {
                 VStack(alignment: .leading, spacing: 5) {
-                    SlideSurface(slide: row, images: deck.images, canvas: deck.pageCanvas)
+                    SlideSurface(slide: row, images: deck.images, canvas: deck.pageCanvas,
+                                 imageCache: imageCache, thumbnail: true)
                         .clipShape(.rect(cornerRadius: 4))
                         .overlay(RoundedRectangle(cornerRadius: 4).strokeBorder(
                             row.id == slide.id ? Color.accentColor : .secondary.opacity(0.24),
@@ -534,6 +567,10 @@ struct EditorView: View {
         }
     }
 
+    private func firstCanvasDraw(_ time: Double, _ imageTime: Double) {
+        Task { @MainActor in session.recordFirstDraw(for: documentIdentity, at: time, imageTime: imageTime) }
+    }
+
     private var workspace: some View {
         GeometryReader { geometry in
             let scale = max(0.1, min((geometry.size.width - 48) / deck.pageCanvas.width,
@@ -542,7 +579,8 @@ struct EditorView: View {
                 Color(nsColor: .underPageBackgroundColor)
                     .onTapGesture { clearObjectSelection() }
                 ZStack(alignment: .topLeading) {
-                    SlideSurface(slide: slide, images: deck.images, omittedObject: editingID, canvas: deck.pageCanvas)
+                    SlideSurface(slide: slide, images: deck.images, omittedObject: editingID, canvas: deck.pageCanvas,
+                                 imageCache: imageCache, didDraw: firstCanvasDraw)
                         .accessibilityIdentifier("editor-canvas-" + slide.id.uuidString)
                         .onTapGesture { clearObjectSelection() }
                         .gesture(objectMarqueeGesture(scale: scale))
@@ -1564,6 +1602,7 @@ struct EditorView: View {
             mode: mode,
             rows: mode == .imported ? SlideReviewRow.imported(deck) : currentPreflightRows,
             pageCount: mode == .imported ? deck.slides.filter { $0.importReport != nil }.count : preflightPageCount,
+            currentPage: index + 1,
             checking: mode == .preflight && checkingPreflight,
             refresh: runPreflight,
             compare: chooseReferencePDF,
@@ -1726,8 +1765,11 @@ final class ImportProgress {
 }
 
 extension PowerPoint {
-    static func readForEditor(_ url: URL, progress: ((Int, Int) -> Void)? = nil) throws -> ImportedDeck {
+    static func readForEditor(_ url: URL, imageTime: ((Double) -> Void)? = nil,
+                              progress: ((Int, Int) -> Void)? = nil) throws -> ImportedDeck {
         try read(url, fontAvailable: { SlideFonts.named($0, size: 12) != nil }, progress: progress) { data in
+            let start = OpenTiming.now
+            defer { imageTime?(OpenTiming.now - start) }
             guard let source = CGImageSourceCreateWithData(data as CFData, nil),
                   let image = PhotoStorage.thumbnail(source) else { return nil }
             return PhotoStorage.png(image)

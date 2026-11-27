@@ -33,7 +33,8 @@ struct SlidesDocument {
 }
 
 enum SlideDrawing {
-    static func draw(_ slide: Slide, images: [UUID: Data], in context: CGContext, canvas: SlideCanvas = .widescreen) {
+    static func draw(_ slide: Slide, images: [UUID: Data], in context: CGContext, canvas: SlideCanvas = .widescreen,
+                     cachedPicture: ((Data, UUID) -> CGImage?)? = nil) {
         // PDF and the SwiftUI canvas both enter here in bottom-left coordinates.
         let height = canvas.height
         context.setFillColor(Palette.color(slide.background).cgColor)
@@ -46,7 +47,7 @@ enum SlideDrawing {
                 context.setFillColor(Palette.color(object.color).cgColor)
                 context.fill(rect)
             case .image:
-                guard let id = object.imageID, let data = images[id], let image = picture(data) else { continue }
+                guard let id = object.imageID, let data = images[id], let image = cachedPicture?(data, id) ?? picture(data) else { continue }
                 context.saveGState()
                 if let appearance = object.pictureAppearance {
                     context.setAlpha(appearance.opacity)
