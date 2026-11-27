@@ -3,7 +3,7 @@ name: Publish KongSlides v0.2.17
 on:
   push:
     branches: [release-v0.2.17]
-    paths: [.github/workflows/publish-v0.2.17.yml, Scripts/verify-v0.2.17-upgrade.sh]
+    paths: [.github/workflows/publish-v0.2.17.yml, Scripts/verify-v0.2.17-upgrade.sh, Scripts/verify-v0.2.17-mouse.swift]
 
 permissions:
   actions: read
