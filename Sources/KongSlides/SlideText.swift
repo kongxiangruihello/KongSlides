@@ -5,6 +5,15 @@ enum SlideText {
     private static let emphasis = NSAttributedString.Key("KongSlidesHighlight")
     private static let distributed = NSAttributedString.Key("KongSlidesDistributed")
 
+    static func listMarkerInset(_ paragraph: SlideParagraph, scale: CGFloat = 1) -> CGFloat {
+        paragraph.firstLine < 0 ? max(0, paragraph.left + paragraph.firstLine) * scale : 0
+    }
+
+    private static func listContentInset(_ paragraph: SlideParagraph, fontSize: CGFloat, scale: CGFloat = 1) -> CGFloat {
+        let markerLength = CGFloat(paragraph.bullet?.marker.count ?? 0)
+        return max(paragraph.left * scale, listMarkerInset(paragraph, scale: scale) + fontSize * max(1.25, markerLength * 0.65))
+    }
+
     static func draw(_ object: SlideObject, in rect: CGRect, context: CGContext) {
         let frame = frame(object, text: attributed(object), in: rect)
         context.saveGState()
@@ -117,9 +126,8 @@ enum SlideText {
             paragraph.firstLineHeadIndent = max(0, format.left + format.firstLine)
             let prefix: String
             if let bullet = format.bullet {
-                paragraph.headIndent = max(format.left, size * 1.25)
-                paragraph.firstLineHeadIndent = format.left + format.firstLine < format.left
-                    ? max(0, format.left + format.firstLine) : 0
+                paragraph.headIndent = listContentInset(format, fontSize: size)
+                paragraph.firstLineHeadIndent = listMarkerInset(format)
                 paragraph.tabStops = [NSTextTab(textAlignment: .left, location: paragraph.headIndent)]
                 prefix = bullet.marker + "\t"
             } else {
@@ -170,10 +178,12 @@ enum SlideText {
             result.append(NSAttributedString(string: piece,
                 attributes: editorAttributes(run ?? base, fallback: object, scale: scale)))
         }
-        let source = object.text as NSString
         var offset = 0
-        for format in object.paragraphStyles where offset < source.length {
-            let range = source.paragraphRange(for: NSRange(location: offset, length: 0))
+        let lines = object.text.components(separatedBy: "\n")
+        for (index, format) in object.paragraphStyles.enumerated() {
+            let count = lines[index].utf16.count + (index + 1 < lines.count ? 1 : 0)
+            let range = NSRange(location: offset, length: count)
+            offset += count
             let paragraph = NSMutableParagraphStyle()
             switch format.alignment {
             case .left: paragraph.alignment = .left
@@ -190,8 +200,12 @@ enum SlideText {
             paragraph.paragraphSpacing = format.after * scale
             paragraph.headIndent = format.left * scale
             paragraph.firstLineHeadIndent = max(0, (format.left + format.firstLine) * scale)
-            result.addAttribute(.paragraphStyle, value: paragraph, range: range)
-            offset = NSMaxRange(range)
+            if format.bullet != nil {
+                let inset = listContentInset(format, fontSize: object.fontSize * scale, scale: scale)
+                paragraph.headIndent = inset
+                paragraph.firstLineHeadIndent = inset
+            }
+            if count > 0 { result.addAttribute(.paragraphStyle, value: paragraph, range: range) }
         }
         return result
     }

@@ -77,10 +77,11 @@ final class EditorWindow: NSWindowController, NSWindowDelegate, NSMenuDelegate {
 
     @objc private func save(_ sender: Any?) { requestSave(asCopy: false) }
     @objc private func saveAs(_ sender: Any?) { requestSave(asCopy: true) }
+    @objc private func savePowerPointCopy(_ sender: Any?) { requestSave(asCopy: true, format: .powerPoint) }
 
-    private func requestSave(asCopy: Bool) {
+    private func requestSave(asCopy: Bool, format: DeckSaveFormat? = nil) {
         guard let window else { return }
-        Task { await session.requestSave(asCopy: asCopy, in: window) }
+        Task { await session.requestSave(asCopy: asCopy, in: window, format: format) }
     }
     @objc private func openRecent(_ item: NSMenuItem) {
         if let url = item.representedObject as? URL { open(url) }
@@ -172,6 +173,7 @@ final class EditorWindow: NSWindowController, NSWindowDelegate, NSMenuDelegate {
         item(file, "关闭窗口", #selector(NSWindow.performClose(_:)), "w")
         item(file, "保存", #selector(save(_:)), "s", target: self)
         item(file, "另存为…", #selector(saveAs(_:)), "s", target: self, modifiers: [.command, .shift])
+        item(file, "另存为 PPTX…", #selector(savePowerPointCopy(_:)), target: self)
 
         let edit = addMenu("编辑")
         item(edit, "撤销", #selector(undo(_:)), "z", target: self)

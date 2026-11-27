@@ -1,9 +1,38 @@
 import Foundation
+import AppKit
 import PDFKit
 import XCTest
 @testable import KongSlides
 
 final class CompatibilityRecoveryTests: XCTestCase {
+    func testListsApplyAtCaretAndNumberNewParagraphs() throws {
+        var object = SlideObject(text: "标题\n第一个\n原有第二个", fontSize: 24)
+        object.toggleList(in: [3..<3], numbered: true)
+        object.toggleList(in: [7..<7], numbered: true)
+        XCTAssertEqual(object.paragraphStyles.map { $0.bullet?.marker }, [nil, "1.", "2."])
+
+        object.replaceText(with: "标题\n第一个\n新增\n原有第二个")
+        XCTAssertEqual(object.paragraphStyles.map { $0.bullet?.marker }, [nil, "1.", "2.", "3."])
+        XCTAssertEqual(object.text, "标题\n第一个\n新增\n原有第二个")
+
+        let display = SlideText.editableText(object, scale: 1)
+        let listed = try XCTUnwrap(display.attribute(.paragraphStyle, at: 3, effectiveRange: nil) as? NSParagraphStyle)
+        let plain = try XCTUnwrap(display.attribute(.paragraphStyle, at: 0, effectiveRange: nil) as? NSParagraphStyle)
+        XCTAssertGreaterThan(listed.firstLineHeadIndent, plain.firstLineHeadIndent)
+        XCTAssertEqual(display.string, object.text)
+
+        object.toggleList(in: [3..<6], numbered: false)
+        XCTAssertEqual(object.paragraphStyles[1].bullet, .symbol("•"))
+        object.toggleList(in: [3..<6], numbered: false)
+        XCTAssertNil(object.paragraphStyles[1].bullet)
+
+        var empty = SlideObject(text: "现有一项")
+        empty.toggleList(in: [], numbered: true)
+        empty.replaceText(with: "现有一项\n")
+        XCTAssertEqual(empty.paragraphIndices(in: [5..<5]), [1])
+        XCTAssertEqual(empty.paragraphStyles.map { $0.bullet?.marker }, ["1.", "2."])
+    }
+
     func testNativeCanvasAndTextRunsRoundTripThroughPPTX() throws {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)

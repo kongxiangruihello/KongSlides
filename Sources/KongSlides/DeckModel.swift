@@ -54,6 +54,34 @@ struct SlideParagraph: Codable, Equatable {
     var left = 0.0
     var firstLine = 0.0
     var bullet: Bullet?
+
+    func hasList(numbered: Bool) -> Bool {
+        switch bullet {
+        case .numbered: return numbered
+        case .symbol: return !numbered
+        case nil: return false
+        }
+    }
+
+    @discardableResult
+    static func renumberList(around index: Int, in formats: inout [Self]) -> Int {
+        guard formats.indices.contains(index), case let .numbered(_, rule) = formats[index].bullet else { return index + 1 }
+        let indent = formats[index].left
+        func matches(_ candidate: Int) -> Bool {
+            guard formats.indices.contains(candidate), formats[candidate].left == indent,
+                  case let .numbered(_, candidateRule) = formats[candidate].bullet else { return false }
+            return candidateRule == rule
+        }
+        var first = index
+        while matches(first - 1) { first -= 1 }
+        guard case let .numbered(start, _) = formats[first].bullet else { return index + 1 }
+        var current = first
+        while matches(current) {
+            formats[current].bullet = .numbered(min(32_767, max(1, min(start, 32_767)) + current - first), rule)
+            current += 1
+        }
+        return current
+    }
 }
 
 struct ImportDiagnostic: Codable, Equatable {
@@ -180,13 +208,19 @@ struct SlideObject: Codable, Identifiable, Equatable {
             layout.paragraphs.indices.contains(index) ? layout.paragraphs[index] : .init()
         }
 
-        let middle = style(at: min(prefix, old.count - 1))
-        let formats = new.indices.map { index in
+        let inherited = style(at: prefix - 1)
+        let insertedAfterList = new.count > old.count && old.count == prefix + suffix && inherited.bullet != nil
+        let middle = insertedAfterList ? inherited : style(at: min(prefix, old.count - 1))
+        var formats = new.indices.map { index in
             if index < prefix { return style(at: index) }
             if index >= new.count - suffix { return style(at: old.count - (new.count - index)) }
             let corresponding = prefix + min(index - prefix, max(0, old.count - prefix - suffix - 1))
-            return corresponding < old.count ? style(at: corresponding) : middle
+            return corresponding < old.count && !insertedAfterList ? style(at: corresponding) : middle
         }
+        let updated = prefix..<(new.count - suffix)
+        var next = updated.lowerBound
+        while next < updated.upperBound { next = SlideParagraph.renumberList(around: next, in: &formats) }
+        if updated.isEmpty, prefix > 0 { SlideParagraph.renumberList(around: prefix - 1, in: &formats) }
         layout.paragraphs = formats
         textLayout = layout
     }

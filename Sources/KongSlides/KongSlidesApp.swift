@@ -373,7 +373,7 @@ struct EditorView: View {
     }
 
     private var controls: some View {
-        HStack(spacing: 13) {
+        HStack(spacing: 9) {
             Button { session.showHome() } label: { Image(systemName: "house") }
                 .help("返回首页").accessibilityLabel("返回首页")
             HStack(spacing: 8) {
@@ -392,14 +392,6 @@ struct EditorView: View {
             } label: { Label("新建页", systemImage: "plus.rectangle") }
             .fixedSize()
             Button(action: addImage) { Label("图片", systemImage: "photo") }
-            Menu {
-                Button("矩形") {
-                    addObject(SlideObject(kind: .rectangle, x: 110, y: 170,
-                                          width: 220, height: 100, color: Palette.indigo))
-                }
-                Button("直线") { addConnector(arrow: .none) }
-                Button("箭头") { addConnector(arrow: .triangle) }
-            } label: { Label("形状", systemImage: "rectangle") }
             Button {
                 let table = SlideTable(columns: [1, 1, 1], rows: [1, 1, 1], cells: (0..<9).map {
                     SlideTable.Cell(row: $0 / 3, column: $0 % 3, bold: $0 < 3, fill: $0 < 3 ? "EDF2FC" : nil)
@@ -414,20 +406,46 @@ struct EditorView: View {
             } label: { Label("讲稿", systemImage: showNotes ? "note.text.badge.minus" : "note.text") }
             .help(showNotes ? "隐藏逐字讲稿" : "显示逐字讲稿")
             .accessibilityIdentifier("toggle-notes-panel")
-            Button { showInspector.toggle() } label: { Image(systemName: "sidebar.right") }
+            Button { showInspector.toggle() } label: { Label("属性", systemImage: "sidebar.right") }
                 .foregroundStyle(showInspector ? Color.accentColor : Color.primary)
+                .fixedSize()
                 .help(showInspector ? "隐藏右侧版面属性" : "显示右侧版面属性")
                 .accessibilityLabel(showInspector ? "隐藏右侧版面属性" : "显示右侧版面属性")
                 .accessibilityIdentifier("toggle-inspector-panel")
             Menu {
-                Button("打开课件…") { session.chooseFile() }.disabled(importing || session.opening)
+                Button("打开课件…") { session.chooseFile() }
+                Button("追加 PowerPoint 页面…") { importPowerPoint() }
+            } label: { Label("导入", systemImage: "square.and.arrow.down") }
+            .fixedSize()
+            .disabled(importing || session.opening || session.saving)
+            .accessibilityIdentifier("import-menu")
+            Menu {
+                Button("可编辑 PPTX…") {
+                    if let window = NSApp.keyWindow {
+                        Task { await session.requestSave(asCopy: true, in: window, format: .powerPoint) }
+                    }
+                }
+                Button("投影 PDF…", action: exportProjectionPDF)
+                Divider()
+                Button("整份课件的授课资料…") { exportClassroomPackage() }
+                Button("本章授课资料…", action: exportChapterPackage)
+                    .disabled(slide.section.isEmpty)
+                Menu("讲稿与配布 PDF") {
+                    Button("教师讲稿版…") { exportTeachingPDF(.teacher) }
+                    Button("学生配布版 · 每页 2 张…") { exportTeachingPDF(.studentTwo) }
+                    Button("学生配布版 · 每页 3 张…") { exportTeachingPDF(.studentThree) }
+                }
+            } label: { Label("导出", systemImage: "square.and.arrow.up") }
+            .fixedSize()
+            .disabled(importing || session.opening || session.saving)
+            .accessibilityIdentifier("export-menu")
+            Menu {
                 if let file = session.currentDocumentURL {
                     Button(session.isFavorite(file) ? "移除课件收藏" : "收藏此课件") {
                         session.toggleFavorite(file)
                     }
                 }
                 Button("查看打开耗时…") { showOpenTiming = true }.disabled(session.openTiming == nil)
-                Button("追加 PPTX 页面到当前课件…") { importPowerPoint() }.disabled(importing || session.opening)
                 Button("查看 PPTX 导入报告") { reviewMode = .imported }
                     .disabled(!deck.slides.contains { $0.importReport != nil })
                 Button("对照原稿 PDF…", action: chooseReferencePDF)
@@ -436,18 +454,7 @@ struct EditorView: View {
                 Button("保存命名快照…", action: saveDeckSnapshot)
                 Button("打开课件快照…", action: openDeckSnapshot)
                 Button("排练放映并计时…", action: startRehearsal)
-                Divider()
-                Button("导出可编辑 PPTX…") { export(.powerPoint) }
-                Button("导出投影 PDF…") { export(.pdf) }
-                Button("导出整份课件的授课资料…") { exportClassroomPackage() }
-                Button("导出本章授课资料…", action: exportChapterPackage)
-                    .disabled(slide.section.isEmpty)
-                Menu("导出讲稿与配布 PDF") {
-                    Button("教师讲稿版…") { exportTeachingPDF(.teacher) }
-                    Button("学生配布版 · 每页 2 张…") { exportTeachingPDF(.studentTwo) }
-                    Button("学生配布版 · 每页 3 张…") { exportTeachingPDF(.studentThree) }
-                }
-            } label: { Label(importing ? "正在导入" : "交换文件", systemImage: "arrow.left.arrow.right") }
+            } label: { Label("更多", systemImage: "ellipsis.circle") }
             .fixedSize()
             Button(action: runPreflight) { Label("放映前检查", systemImage: "checklist") }
                 .disabled(checkingPreflight)
@@ -642,6 +649,14 @@ struct EditorView: View {
                         .accessibilityIdentifier("editor-canvas-" + slide.id.uuidString)
                         .onTapGesture { clearObjectSelection() }
                         .gesture(objectMarqueeGesture(scale: scale))
+                        .contextMenu {
+                            Button("插入矩形") {
+                                addObject(SlideObject(kind: .rectangle, x: 110, y: 170,
+                                                      width: 220, height: 100, color: Palette.indigo))
+                            }
+                            Button("插入直线") { addConnector(arrow: .none) }
+                            Button("插入箭头") { addConnector(arrow: .triangle) }
+                        }
                     ForEach(slide.objects.filter { !$0.isLocked }) { object in
                         objectOverlay(object, scale: scale)
                     }
@@ -794,8 +809,12 @@ struct EditorView: View {
         if editingID == object.id {
             CanvasTextEditor(object: object, scale: scale, selectAll: selectNewText, edit: { value in
                 textBinding(object.id).wrappedValue = value
-            }, select: { selectedTextRanges = $0 }, finish: {
-                if editingID == object.id { editingID = nil }
+            }, select: {
+                if editingID == object.id { selectedTextRanges = $0 }
+            }, finish: {
+                if editingID == object.id {
+                    editingID = nil
+                }
             })
                 .id(object.id)
                 .background(Color(nsColor: Palette.color(slide.background)))
@@ -1825,17 +1844,14 @@ struct EditorView: View {
         }
     }
 
-    private func export(_ type: ExportType) {
+    private func exportProjectionPDF() {
         let panel = NSSavePanel()
-        panel.allowedContentTypes = [type.contentType]
-        panel.nameFieldStringValue = session.name + "." + type.rawValue
-        let backupOption = type == .pdf ? backupExportOption(for: panel) : nil
+        panel.allowedContentTypes = [.pdf]
+        panel.nameFieldStringValue = session.name + ".pdf"
+        let backupOption = backupExportOption(for: panel)
         guard panel.runModal() == .OK, let url = panel.url else { return }
         do {
-            switch type {
-            case .pdf: try SlideDrawing.pdf(deck, includeBackups: backupOption?.state == .on, to: url)
-            case .powerPoint: try PowerPoint.write(deck, to: url)
-            }
+            try SlideDrawing.pdf(deck, includeBackups: backupOption?.state == .on, to: url)
         } catch { linkedError = error.localizedDescription }
     }
 }
@@ -1887,17 +1903,6 @@ private enum PhotoStorage {
         CGImageDestinationAddImage(destination, image, nil)
         guard CGImageDestinationFinalize(destination) else { return nil }
         return data as Data
-    }
-}
-
-private enum ExportType: String {
-    case pdf
-    case powerPoint = "pptx"
-    var contentType: UTType {
-        switch self {
-        case .pdf: .pdf
-        case .powerPoint: .slidePowerPoint
-        }
     }
 }
 

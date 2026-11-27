@@ -133,7 +133,9 @@ extension SlideObject {
         return lines.indices.filter { index in
             let start = offset
             offset += lines[index].utf16.count + 1
-            return ranges.contains { $0.overlaps(start..<offset) }
+            return ranges.contains { range in
+                range.isEmpty ? (start..<offset).contains(range.lowerBound) : range.overlaps(start..<offset)
+            }
         }
     }
 
@@ -143,6 +145,36 @@ extension SlideObject {
         for index in paragraphIndices(in: ranges) { change(index, &paragraphs[index]) }
         layout.paragraphs = paragraphs
         textLayout = layout
+    }
+
+    mutating func toggleList(in ranges: [Range<Int>], numbered: Bool) {
+        let indices = paragraphIndices(in: ranges)
+        let paragraphs = paragraphStyles
+        let remove = indices.allSatisfy { paragraphs[$0].hasList(numbered: numbered) }
+        let hanging = max(12, (fontSize * 1.25).rounded())
+        formatParagraphs(in: ranges) { _, paragraph in
+            if remove {
+                paragraph.bullet = nil
+                paragraph.left = max(0, paragraph.left + min(0, paragraph.firstLine))
+                paragraph.firstLine = max(0, paragraph.firstLine)
+            } else {
+                if paragraph.bullet == nil && paragraph.firstLine >= 0 {
+                    paragraph.left = min(10_000, paragraph.left + hanging)
+                    paragraph.firstLine = -hanging
+                }
+                if !paragraph.hasList(numbered: numbered) {
+                    paragraph.bullet = numbered ? .numbered(1, "arabicPeriod") : .symbol("•")
+                }
+            }
+        }
+        if !remove && numbered {
+            var layout = textLayout ?? .init()
+            var next = 0
+            for index in indices where index >= next {
+                next = SlideParagraph.renumberList(around: index, in: &layout.paragraphs)
+            }
+            textLayout = layout
+        }
     }
 
     func textSegments(in bounds: Range<Int>) -> [(String, SlideTextRun?)] {

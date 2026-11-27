@@ -30,7 +30,8 @@ struct EditorFormattingToolbar: View {
     @State private var sizeInput = ""
 
     private let sizes: [Double] = [8, 9, 10, 11, 12, 13.5, 14, 16, 18, 20, 24, 28, 32, 36, 44, 54, 60, 72, 96]
-    private var styles: [SlideTextRun] { object?.formattingStyles(in: ranges) ?? [] }
+    private var textRanges: [Range<Int>] { ranges.filter { !$0.isEmpty } }
+    private var styles: [SlideTextRun] { object?.formattingStyles(in: textRanges) ?? [] }
     private var primary: SlideTextRun? { styles.first }
     private var size: Double { primary?.size ?? object?.fontSize ?? 36 }
     private var font: String? { primary?.usesSystemFont == true ? nil : primary?.fontName ?? object?.textLayout?.fontName }
@@ -47,6 +48,13 @@ struct EditorFormattingToolbar: View {
                 .help("添加文本框（⌘⇧T）")
                 .accessibilityIdentifier("insert-text-box")
                 .keyboardShortcut("t", modifiers: [.command, .shift])
+            rule
+            HStack(spacing: 4) {
+                tool("项目符号", icon: "list.bullet", active: selectedBullets(numbered: false)) { bullets(numbered: false) }
+                tool("编号", icon: "list.number", active: selectedBullets(numbered: true)) { bullets(numbered: true) }
+            }
+            .disabled(object == nil)
+            .help(object == nil ? "先选中文本框，再设置项目符号或编号" : "")
             rule
             ScrollView(.horizontal) {
                 HStack(spacing: 4) {
@@ -78,8 +86,8 @@ struct EditorFormattingToolbar: View {
                         spacing("更宽", 3)
                     }
                     compactMenu("更改大小写", icon: "textformat") {
-                        Button("全部大写") { update { $0.changeLetterCase(in: ranges, uppercase: true) } }
-                        Button("全部小写") { update { $0.changeLetterCase(in: ranges, uppercase: false) } }
+                        Button("全部大写") { update { $0.changeLetterCase(in: textRanges, uppercase: true) } }
+                        Button("全部小写") { update { $0.changeLetterCase(in: textRanges, uppercase: false) } }
                     }
                     compactMenu("文字高亮", icon: "highlighter", color: primary?.characterStyle?.highlight ?? "FFE766") {
                         Button("取消高亮") { changeCharacter { $0.highlight = nil } }
@@ -95,8 +103,6 @@ struct EditorFormattingToolbar: View {
                         }
                     }
                     rule
-                    tool("项目符号", icon: "list.bullet", active: selectedBullets(numbered: false)) { bullets(numbered: false) }
-                    tool("编号", icon: "list.number", active: selectedBullets(numbered: true)) { bullets(numbered: true) }
                     tool("减少缩进", icon: "decrease.indent") { indent(by: -16) }
                     tool("增加缩进", icon: "increase.indent") { indent(by: 16) }
                     rule
@@ -224,7 +230,7 @@ struct EditorFormattingToolbar: View {
     }
 
     private func format(_ transform: @escaping (inout SlideTextRun) -> Void) {
-        update { $0.formatCharacters(in: ranges, transform) }
+        update { $0.formatCharacters(in: textRanges, transform) }
     }
 
     private func changeCharacter(_ transform: @escaping (inout SlideCharacterStyle) -> Void) {
@@ -236,7 +242,7 @@ struct EditorFormattingToolbar: View {
     }
 
     private func setFont(_ family: String?) {
-        let useSystem = family == nil && !ranges.isEmpty && object?.textLayout?.fontName != nil
+        let useSystem = family == nil && !textRanges.isEmpty && object?.textLayout?.fontName != nil
         format {
             $0.fontName = family
             $0.usesSystemFont = useSystem ? true : nil
@@ -249,7 +255,7 @@ struct EditorFormattingToolbar: View {
             $0.bold = false
             $0.color = Palette.ink
             $0.fontName = nil
-            $0.usesSystemFont = !ranges.isEmpty && object?.textLayout?.fontName != nil ? true : nil
+            $0.usesSystemFont = !textRanges.isEmpty && object?.textLayout?.fontName != nil ? true : nil
             $0.baseline = 0
             $0.characterStyle = nil
         }
@@ -265,25 +271,11 @@ struct EditorFormattingToolbar: View {
     }
 
     private func selectedBullets(numbered: Bool) -> Bool {
-        !paragraphs.isEmpty && paragraphs.allSatisfy {
-            switch $0.bullet {
-            case .numbered: return numbered
-            case .symbol: return !numbered
-            case nil: return false
-            }
-        }
+        !paragraphs.isEmpty && paragraphs.allSatisfy { $0.hasList(numbered: numbered) }
     }
 
     private func bullets(numbered: Bool) {
-        let remove = selectedBullets(numbered: numbered)
-        update { object in
-            var number = 0
-            object.formatParagraphs(in: ranges) { _, paragraph in
-                number += 1
-                if remove { paragraph.bullet = nil }
-                else { paragraph.bullet = numbered ? .numbered(number, "arabicPeriod") : .symbol("•") }
-            }
-        }
+        update { $0.toggleList(in: ranges, numbered: numbered) }
     }
 
     private func indent(by value: Double) {

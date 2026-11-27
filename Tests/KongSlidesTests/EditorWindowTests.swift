@@ -4,6 +4,41 @@ import XCTest
 
 final class EditorWindowTests: XCTestCase {
     @MainActor
+    func testSaveAsPowerPointWritesEditableCopyAndPreservesNativeSession() async throws {
+        _ = NSApplication.shared
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let suite = "kongslides-pptx-copy-tests-\(UUID())"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let original = folder.appendingPathComponent("原课件.kongslides")
+        let copy = folder.appendingPathComponent("可编辑副本.pptx")
+        let deck = Deck(slides: [.titleSlide("原课件", subtitle: ""), .titleSlide("备课", subtitle: "")])
+        try SlidesDocument(deck: deck).writeNative(to: original)
+        let session = EditorFileSession(positions: RecentSlidePositions(defaults: defaults),
+                                        favorites: FavoriteDocuments(defaults: defaults))
+        session.open(original)
+        try await finishOpening(session)
+        session.rememberPage(deck.slides[1].id, for: session.identity)
+        var edited = session.document
+        edited.deck.slides[1].objects[0].replaceText(with: "可编辑中文\n第二项")
+        edited.deck.slides[1].objects[0].toggleList(in: [], numbered: true)
+        edited.deck.slides[1].speakerNotes = "导出的讲稿"
+        session.edit(edited)
+        try await session.writeRequestedSave(to: copy, format: .powerPoint)
+        XCTAssertFalse(session.saving)
+        XCTAssertTrue(session.isEdited)
+        XCTAssertEqual(session.fileURL, original)
+        XCTAssertEqual(session.activePageID, deck.slides[1].id)
+        XCTAssertEqual(try SlidesDocument.readNative(original).deck, deck)
+        let exported = try PowerPoint.read(copy, prepareImage: { $0 }).deck.slides[1]
+        XCTAssertEqual(exported.objects[0].text, "可编辑中文\n第二项")
+        XCTAssertEqual(exported.objects[0].paragraphStyles.map { $0.bullet?.marker }, ["1.", "2."])
+        XCTAssertEqual(exported.speakerNotes, "导出的讲稿")
+    }
+
+    @MainActor
     func testSaveAsWritesAnIndependentLargeCopyAndKeepsTheCurrentPage() async throws {
         _ = NSApplication.shared
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
