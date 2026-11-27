@@ -46,7 +46,7 @@ enum InstallUpdate {
     @MainActor
     static func main() {
         let args = Array(CommandLine.arguments.dropFirst())
-        guard args.count == 6, let pid = pid_t(args[0]), pid > 1,
+        guard args.count == 6 || (args.count == 7 && args[6] == "--show-progress"), let pid = pid_t(args[0]), pid > 1,
               let requested = AppVersion(args[3]) else { return }
 
         let source = URL(fileURLWithPath: args[1], isDirectory: true).standardizedFileURL
@@ -65,37 +65,67 @@ enum InstallUpdate {
               source.path == destination.path || destination.lastPathComponent == "KongSlides.app",
               expected.map({ $0 < requested }) ?? true else { return }
 
+        if args.count == 6 {
+            if let error = install(pid: pid, source: source, directory: directory, destination: destination,
+                                   candidate: candidate, requested: requested, expected: expected, phase: { _ in }) {
+                report(error)
+            }
+            return
+        }
+
+        let app = NSApplication.shared
+        app.setActivationPolicy(.accessory)
+        let progress = UpdateProgressPanel(title: "安装 KongSlides \(requested)")
+        progress.show("正在等待旧版退出…")
+        DispatchQueue.global(qos: .userInitiated).async {
+            let error = install(pid: pid, source: source, directory: directory, destination: destination,
+                                candidate: candidate, requested: requested, expected: expected) { phase in
+                DispatchQueue.main.async { progress.show(phase) }
+            }
+            DispatchQueue.main.async {
+                progress.dismiss()
+                if let error { report(error) }
+                app.terminate(nil)
+            }
+        }
+        app.run()
+    }
+
+    private static func install(pid: pid_t, source: URL, directory: URL, destination: URL,
+                                candidate: URL, requested: AppVersion, expected: AppVersion?,
+                                phase: (String) -> Void) -> String? {
         let files = FileManager.default
         guard let lock = makeInstallLock(destination) else {
             try? files.removeItem(at: directory)
-            report("无法取得更新锁，可能有另一个更新正在安装。")
-            return
+            return "无法取得更新锁，可能有另一个更新正在安装。"
         }
         defer { close(lock) }
         guard waitForExit(pid) else {
             try? files.removeItem(at: directory)
-            report("应用仍在运行，本次更新已取消。请在菜单中重新检查更新。")
-            return
+            return "应用仍在运行，本次更新已取消。请在菜单中重新检查更新。"
         }
 
+        phase("正在校验新版…")
         do {
             guard UpdateInstallation.version(of: candidate) == requested,
                   try UpdateInstallation.runSystemTool("/usr/bin/codesign",
                       arguments: ["--verify", "--strict", "--deep", candidate.path]) else {
                 throw CocoaError(.fileReadCorruptFile)
             }
+            phase("正在替换应用…")
             try UpdateInstallation.install(candidate, at: destination, replacing: expected)
         } catch {
             try? files.removeItem(at: directory)
             _ = launchApp(source)
-            report("无法在所选位置安装。该位置可能已被占用、发生变化或不可写。请重新检查更新。")
-            return
+            return "无法在所选位置安装。该位置可能已被占用、发生变化或不可写。请重新检查更新。"
         }
 
+        phase("正在打开新版…")
         if launchApp(destination) {
             try? files.removeItem(at: directory)
-            return
+            return nil
         }
+        phase("正在恢复旧版…")
         do {
             if expected == nil {
                 try UpdateInstallation.placeExclusively(destination, at: candidate)
@@ -104,10 +134,10 @@ enum InstallUpdate {
             }
             try? files.removeItem(at: directory)
             _ = launchApp(source)
-            report("新版未能重新打开，已撤销本次安装。")
+            return "新版未能重新打开，已撤销本次安装。"
         } catch {
             let detail = expected == nil ? "请在 Finder 中核对 \(destination.path)。" : "旧版保留在 \(candidate.path)。"
-            report("新版未能重新打开。\(detail)")
+            return "新版未能重新打开。\(detail)"
         }
     }
 }

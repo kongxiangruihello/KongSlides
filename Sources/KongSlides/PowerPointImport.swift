@@ -3,52 +3,106 @@ import Foundation
 import FoundationXML
 #endif
 
+enum PowerPointReadError: LocalizedError {
+    case unavailable
+    case legacy
+    case protected
+    case package
+    case invalidPart(String)
+    case missingPart(String)
+    case limit(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .unavailable: "无法读取源文件。若文件位于云盘，请先下载到本机。"
+        case .legacy: "这是旧式 .ppt 文件。请在 PowerPoint 中另存为 .pptx。"
+        case .protected: "这是受保护或使用旧式容器的文件。请在 PowerPoint 中打开后另存一份无密码的 .pptx。"
+        case .package: "这是无效或不完整的 PPTX 文件包。请重新下载，或在 PowerPoint 中另存副本。"
+        case .invalidPart(let path): "无法解析 PPTX 部件「\(path)」。"
+        case .missingPart(let path): "PPTX 缺少部件「\(path)」。"
+        case .limit(let part): "导入「\(part)」时超过了安全读取上限。请将源课件拆成几份后重试。"
+        }
+    }
+}
+
 extension PowerPoint {
     struct ImportedDeck {
         let deck: Deck
     }
 
     static func read(_ url: URL, fontAvailable: ((String) -> Bool)? = nil,
+                     progress: ((Int, Int) -> Void)? = nil,
                      prepareImage: (Data) -> Data?) throws -> ImportedDeck {
-        let archive = PresentationArchive(url: url)
-        let root = try archive.xml("ppt/presentation.xml")
+        try Task.checkCancellation()
+        let archive = try PresentationArchive(url: url)
+        let presentationPath = try archive.presentationPath()
+        let root = try archive.xml(presentationPath)
         guard let size = root.child("sldSz"),
               let cx = size.number("cx"), let cy = size.number("cy"),
               (1...200_000_000).contains(cx), (1...200_000_000).contains(cy),
-              let slideIDs = root.child("sldIdLst")?.children(named: "sldId"),
-              (1...500).contains(slideIDs.count) else {
-            throw CocoaError(.fileReadCorruptFile)
+              let slideIDs = root.child("sldIdLst")?.children(named: "sldId"), !slideIDs.isEmpty else {
+            throw PowerPointReadError.invalidPart(presentationPath)
         }
+        guard slideIDs.count <= 500 else { throw PowerPointReadError.limit("幻灯片数量（最多 500 页）") }
+        progress?(0, slideIDs.count)
         let factor = min(960 / cx, 540 / cy)
         let widthInset = (960 - cx * factor) / 2
         let heightInset = (540 - cy * factor) / 2
-        let rootLinks = try archive.links(from: "ppt/presentation.xml")
+        let rootLinks = try archive.links(from: presentationPath)
         var draft = Deck(slides: [], importedTitle: url.deletingPathExtension().lastPathComponent)
         var imageIDs: [String: UUID] = [:]
         let source = url.lastPathComponent
 
+        var readableSlides = 0
         for (index, slideID) in slideIDs.enumerated() {
-            guard let relation = slideID.attribute(forLocalName: "id", uri: OfficeNamespace.relationships)?.stringValue,
-                  let path = rootLinks[relation]?.path else { throw CocoaError(.fileReadCorruptFile) }
-            let xml = try archive.xml(path)
-            guard let content = xml.child("cSld"), let objects = content.child("spTree") else {
-                throw CocoaError(.fileReadCorruptFile)
+            try Task.checkCancellation()
+            defer { progress?(index + 1, slideIDs.count) }
+            var diagnostics: [ImportDiagnostic] = []
+            func note(_ kind: ImportDiagnostic.Kind, _ detail: String, object: UUID? = nil) {
+                let diagnostic = ImportDiagnostic(kind: kind, detail: detail, objectID: object)
+                if !diagnostics.contains(diagnostic) { diagnostics.append(diagnostic) }
             }
-            let links = try archive.links(from: path, optional: true)
+            let xml: XMLElement
+            let content: XMLElement
+            let objects: XMLElement
+            let path: String
+            do {
+                guard let relation = slideID.officeRelationship("id"), let target = rootLinks[relation]?.path else {
+                    throw PowerPointReadError.missingPart("第 \(index + 1) 页的幻灯片关系")
+                }
+                path = target
+                xml = try archive.xml(path)
+                guard let common = xml.child("cSld"), let tree = common.child("spTree") else {
+                    throw PowerPointReadError.invalidPart(path)
+                }
+                content = common
+                objects = tree
+            } catch {
+                try Task.checkCancellation()
+                if slideIDs.count == 1 { throw error }
+                let warning = "无法转换源第 \(index + 1) 页：\(error.localizedDescription)"
+                note(.unsupported, warning)
+                var placeholder = Slide.titleSlide("源第 \(index + 1) 页未转换", subtitle: error.localizedDescription)
+                placeholder.hiddenInShow = true
+                placeholder.importReport = SlideImportReport(sourceName: source, sourcePage: index + 1, diagnostics: diagnostics)
+                draft.slides.append(placeholder)
+                continue
+            }
+            readableSlides += 1
+            let links = try archive.recover({ try archive.links(from: path, optional: true) }, fallback: [:]) {
+                note(.unsupported, "本页部分资源关系无法读取：\($0.localizedDescription)")
+            }
             var context = PowerPointLayout(defaults: root.child("defaultTextStyle"))
             if let path = links.values.first(where: { $0.type == "slideLayout" })?.path {
-                context = try archive.layout(at: path, defaults: context.defaults)
+                context = try archive.recover({ try archive.layout(at: path, defaults: context.defaults) }, fallback: context) {
+                    note(.geometry, "版式或主题无法读取：\($0.localizedDescription)")
+                }
             }
             let background = content.child("bg") ?? context.layout?.child("cSld")?.child("bg") ??
                 context.master?.child("cSld")?.child("bg")
             let backgroundColor = background?.child("bgPr").flatMap { context.color($0) }
             var slide = Slide(background: backgroundColor ?? "FFFFFF")
             if ["0", "false"].contains(xml.value("show") ?? "") { slide.hiddenInShow = true }
-            var diagnostics: [ImportDiagnostic] = []
-            func note(_ kind: ImportDiagnostic.Kind, _ detail: String, object: UUID? = nil) {
-                let diagnostic = ImportDiagnostic(kind: kind, detail: detail, objectID: object)
-                if !diagnostics.contains(diagnostic) { diagnostics.append(diagnostic) }
-            }
             if abs(cx / cy - 16.0 / 9.0) > 0.002 { note(.canvas, "源页面按比例放入 16∶9 画布。") }
             if background != nil && backgroundColor == nil {
                 note(.background, "本页使用了渐变、图片或主题背景，已改用白色。")
@@ -62,10 +116,11 @@ extension PowerPoint {
             }) { note(.unsupported, "版式或母版上的独立装饰对象未转换。") }
 
             if let notes = links.values.first(where: { $0.type == "notesSlide" }) {
-                let notesXML = try archive.xml(notes.path)
-                let noteShapes = notesXML.child("cSld")?.child("spTree")?.children(named: "sp") ?? []
-                slide.speakerNotes = noteShapes.first(where: { $0.placeholderType == "body" })?
-                    .child("txBody")?.plainText ?? ""
+                slide.speakerNotes = try archive.recover({
+                    let notesXML = try archive.xml(notes.path)
+                    let shapes = notesXML.child("cSld")?.child("spTree")?.children(named: "sp") ?? []
+                    return shapes.first(where: { $0.placeholderType == "body" })?.child("txBody")?.plainText ?? ""
+                }, fallback: "") { note(.unsupported, "讲稿无法读取：\($0.localizedDescription)") }
             }
 
             for element in objects.elementChildren {
@@ -109,13 +164,16 @@ extension PowerPoint {
 
                 if name == "pic" {
                     guard let ref = element.child("blipFill")?.child("blip")?
-                        .attribute(forLocalName: "embed", uri: OfficeNamespace.relationships)?.stringValue,
+                        .officeRelationship("embed"),
                           let imagePath = links[ref]?.path else {
                         note(.image, "「\(label)」没有可读取的嵌入图片。")
                         continue
                     }
                     if imageIDs[imagePath] == nil {
-                        guard let bytes = try archive.part(imagePath, maximum: 48 * 1024 * 1024, optional: true),
+                        let imageData = try archive.recover({
+                            try archive.part(imagePath, maximum: 48 * 1024 * 1024)
+                        }, fallback: nil) { note(.image, "图片 \(label) 无法读取：\($0.localizedDescription)") }
+                        guard let bytes = imageData,
                               let png = prepareImage(bytes) else {
                             note(.image, "「\(label)」的图片无法解码。")
                             continue
@@ -196,12 +254,16 @@ extension PowerPoint {
             slide.importReport = SlideImportReport(sourceName: source, sourcePage: index + 1, diagnostics: diagnostics)
             draft.slides.append(slide)
         }
+        guard readableSlides > 0 else { throw PowerPointReadError.invalidPart("未找到可读取的幻灯片") }
         return ImportedDeck(deck: try draft.validated())
     }
 }
 
 private enum OfficeNamespace {
-    static let relationships = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+    static let relationships = [
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
+        "http://purl.oclc.org/ooxml/officeDocument/relationships"
+    ]
 }
 
 private final class PresentationArchive {
@@ -210,7 +272,34 @@ private final class PresentationArchive {
     private var inheritedParts: [String: XMLElement] = [:]
     private var remaining = 192 * 1024 * 1024
 
-    init(url: URL) { self.url = url }
+    init(url: URL) throws {
+        self.url = url
+        if url.pathExtension.lowercased() == "ppt" { throw PowerPointReadError.legacy }
+        guard let handle = try? FileHandle(forReadingFrom: url) else { throw PowerPointReadError.unavailable }
+        defer { try? handle.close() }
+        guard let prefix = try? handle.read(upToCount: 8) else { throw PowerPointReadError.unavailable }
+        if prefix == Data([0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1]) {
+            throw PowerPointReadError.protected
+        }
+        guard prefix.starts(with: [0x50, 0x4B, 0x03, 0x04]) else { throw PowerPointReadError.package }
+    }
+
+    func presentationPath() throws -> String {
+        let entries = try links(from: "")
+        guard let path = entries.values.first(where: { $0.type == "officeDocument" })?.path else {
+            throw PowerPointReadError.missingPart("根关系中的演示文稿")
+        }
+        return path
+    }
+
+    func recover<T>(_ read: () throws -> T, fallback: T, report: (Error) -> Void) throws -> T {
+        do { return try read() }
+        catch {
+            try Task.checkCancellation()
+            report(error)
+            return fallback
+        }
+    }
 
     func layout(at path: String, defaults: XMLElement?) throws -> PowerPointLayout {
         if let existing = layouts[path] { return existing }
@@ -235,8 +324,8 @@ private final class PresentationArchive {
 
     func xml(_ path: String) throws -> XMLElement {
         guard let data = try part(path, maximum: 4 * 1024 * 1024),
-              let root = try xmlDocument(data).rootElement()?.copy() as? XMLElement else {
-            throw CocoaError(.fileReadCorruptFile)
+              let root = try xmlDocument(data, path: path).rootElement()?.copy() as? XMLElement else {
+            throw PowerPointReadError.invalidPart(path)
         }
         return root
     }
@@ -246,7 +335,7 @@ private final class PresentationArchive {
         let folder = Array(location.dropLast())
         let path = (folder + ["_rels", (location.last ?? "") + ".rels"]).joined(separator: "/")
         guard let data = try self.part(path, maximum: 4 * 1024 * 1024, optional: optional) else { return [:] }
-        let document = try xmlDocument(data)
+        let document = try xmlDocument(data, path: path)
         var result: [String: (type: String, path: String)] = [:]
         for item in document.rootElement()?.children(named: "Relationship") ?? [] {
             guard item.unqualifiedAttribute("TargetMode")?.stringValue != "External",
@@ -264,28 +353,45 @@ private final class PresentationArchive {
                     resolved.append(String(segment))
                 }
             }
-            if valid && resolved.first == "ppt" {
+            if valid && !resolved.isEmpty {
                 result[id] = (String(type), resolved.joined(separator: "/"))
             }
         }
         return result
     }
 
-    private func xmlDocument(_ data: Data) throws -> XMLDocument {
-        guard let text = String(data: data, encoding: .utf8), !text.contains("\0"),
-              !text.contains("<!DOCTYPE") else {
-            throw CocoaError(.fileReadCorruptFile)
+    private func xmlDocument(_ data: Data, path: String) throws -> XMLDocument {
+        let prefix = Array(data.prefix(4))
+        let encoding: String.Encoding
+        if prefix.starts(with: [0xFE, 0xFF]) || prefix.starts(with: [0xFF, 0xFE]) {
+            encoding = .utf16
+        } else if prefix.starts(with: [0x00, 0x3C]) {
+            encoding = .utf16BigEndian
+        } else if prefix.starts(with: [0x3C, 0x00]) {
+            encoding = .utf16LittleEndian
+        } else {
+            encoding = .utf8
         }
-        return try XMLDocument(xmlString: text, options: [.nodeLoadExternalEntitiesNever])
+        guard let text = String(data: data, encoding: encoding), !text.contains("\0"),
+              !text.contains("<!DOCTYPE") else {
+            throw PowerPointReadError.invalidPart(path)
+        }
+        // The input has already been decoded into Swift text; remove any old byte-encoding declaration.
+        var xml = text
+        if xml.first == "\u{FEFF}" { xml.removeFirst() }
+        if xml.hasPrefix("<?xml "), let end = xml.range(of: "?>") { xml.removeSubrange(..<end.upperBound) }
+        do { return try XMLDocument(data: Data(xml.utf8), options: [.nodeLoadExternalEntitiesNever]) }
+        catch { throw PowerPointReadError.invalidPart(path) }
     }
 
     func part(_ path: String, maximum: Int, optional: Bool = false) throws -> Data? {
-        let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/_-.")
-        guard path.hasPrefix("ppt/"), !path.isEmpty,
-              path.unicodeScalars.allSatisfy(allowed.contains),
-              !path.split(separator: "/").contains("..") else {
-            if optional { return nil }
-            throw CocoaError(.fileReadCorruptFile)
+        try Task.checkCancellation()
+        let forbidden = CharacterSet.controlCharacters.union(CharacterSet(charactersIn: "*?[]\\:#"))
+        let segments = path.split(separator: "/", omittingEmptySubsequences: false)
+        guard !segments.contains(where: { $0.isEmpty || $0 == "." || $0 == ".." }),
+              !path.unicodeScalars.contains(where: forbidden.contains),
+              !path.hasPrefix("-") else {
+            throw PowerPointReadError.invalidPart(path)
         }
         let process = Process()
         let pipe = Pipe()
@@ -302,20 +408,31 @@ private final class PresentationArchive {
         }
         var data = Data()
         while let chunk = try input.read(upToCount: 64 * 1024), !chunk.isEmpty {
+            try Task.checkCancellation()
             guard data.count + chunk.count <= min(maximum, remaining) else {
-                throw CocoaError(.fileReadTooLarge)
+                throw PowerPointReadError.limit(path)
             }
             data.append(chunk)
         }
         process.waitUntilExit()
-        if optional && process.terminationStatus == 11 { return nil }
-        guard process.terminationStatus == 0 else { throw CocoaError(.fileReadCorruptFile) }
+        if process.terminationStatus == 11 {
+            if optional { return nil }
+            throw PowerPointReadError.missingPart(path)
+        }
+        if [81, 82].contains(process.terminationStatus) { throw PowerPointReadError.protected }
+        guard process.terminationStatus == 0 else { throw PowerPointReadError.invalidPart(path) }
         remaining -= data.count
         return data
     }
 }
 
 extension XMLElement {
+    func officeRelationship(_ localName: String) -> String? {
+        OfficeNamespace.relationships.lazy.compactMap {
+            self.attribute(forLocalName: localName, uri: $0)?.stringValue
+        }.first
+    }
+
     var elementChildren: [XMLElement] { (children ?? []).compactMap { $0 as? XMLElement } }
 
     func children(named name: String) -> [XMLElement] { elementChildren.filter { $0.localName == name } }

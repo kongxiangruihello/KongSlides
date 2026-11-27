@@ -1,5 +1,6 @@
 import AppKit
 import ImageIO
+import Observation
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -68,6 +69,9 @@ struct EditorView: View {
     @State private var preflightPageCount = 0
     @State private var checkingPreflight = false
     @State private var importing = false
+    @State private var importTask: Task<PowerPoint.ImportedDeck, Error>?
+    @State private var importProgress = ImportProgress()
+    @State private var convertedNativeOpen = false
     @State private var showNotes = true
     @State private var search = ""
     @State private var presenter = PresentationController()
@@ -80,11 +84,38 @@ struct EditorView: View {
     private var index: Int { deck.slides.firstIndex { $0.id == slideID } ?? 0 }
     private var slide: Slide { deck.slides[index] }
     private var selectedPages: Set<UUID> { selectedPageIDs.intersection(deck.slides.map(\.id)) }
+    private var sourceIsPowerPoint: Bool { fileURL?.pathExtension.lowercased() == "pptx" }
     private var selection: Int? { slide.objects.firstIndex { $0.id == objectID } }
 
     var body: some View {
         VStack(spacing: 0) {
             controls
+            if sourceIsPowerPoint {
+                HStack {
+                    Text("PowerPoint 导入预览")
+                    Spacer()
+                    Button("转为可编辑课件") {
+                        let fresh = SlidesDocument(deck: deck)
+                        newDocument(fresh)
+                        convertedNativeOpen = true
+                    }.buttonStyle(.borderedProminent)
+                }
+                .padding(10)
+            }
+            if importing {
+                HStack {
+                    if let count = importProgress.total, count > 0 {
+                        ProgressView(value: Double(importProgress.completed), total: Double(count))
+                        Text("\(importProgress.completed) / \(count) 页").monospacedDigit()
+                    } else {
+                        ProgressView().controlSize(.small)
+                        Text("正在读取 PPTX…")
+                    }
+                    Spacer()
+                    Button("取消导入") { importTask?.cancel() }
+                }
+                .padding(.horizontal, 16).padding(.vertical, 8)
+            }
             Divider()
             HStack(spacing: 0) {
                 sidebar.frame(width: 206)
@@ -108,9 +139,24 @@ struct EditorView: View {
         .background(EditorKeyMonitor(handle: handleShortcut))
         .background(ImportedDraftName(title: fileURL == nil ? deck.importedTitle : nil))
         .onAppear {
-            if fileURL == nil, deck.importedTitle != nil, deck.slides.contains(where: { $0.importReport != nil }) {
+            if (fileURL == nil || sourceIsPowerPoint), deck.importedTitle != nil,
+               deck.slides.contains(where: { $0.importReport != nil }) {
                 reviewMode = .imported
             }
+        }
+        .task(id: fileURL) {
+            if sourceIsPowerPoint && !convertedNativeOpen {
+                let fresh = SlidesDocument(deck: deck)
+                convertedNativeOpen = true
+                newDocument(fresh)
+            }
+        }
+        .onDisappear { importTask?.cancel() }
+        .dropDestination(for: URL.self) { urls, _ in
+            guard !importing, urls.count == 1, let url = urls.first,
+                  url.isFileURL, ["pptx", "ppt"].contains(url.pathExtension.lowercased()) else { return false }
+            loadPowerPoint(url, asNewDocument: true)
+            return true
         }
         .sheet(isPresented: $notesFocus, onDismiss: { selectedPageIDs = [slide.id] }) {
             NotesFocusView(document: $document, slideID: $slideID, fontSize: $notesFontSize)
@@ -856,19 +902,31 @@ struct EditorView: View {
 
     private func importPowerPoint(asNewDocument: Bool) {
         let panel = NSOpenPanel()
-        panel.allowedContentTypes = [ExportType.powerPoint.contentType]
+        let legacy = UTType(filenameExtension: "ppt")
+        panel.allowedContentTypes = [.slidePowerPoint] + [legacy].compactMap { $0 }
         guard panel.runModal() == .OK, let url = panel.url else { return }
+        loadPowerPoint(url, asNewDocument: asNewDocument)
+    }
+
+    private func loadPowerPoint(_ url: URL, asNewDocument: Bool) {
+        guard !importing else { return }
         importing = true
+        let status = ImportProgress()
+        importProgress = status
+        let task = Task.detached(priority: .userInitiated) {
+            try PowerPoint.readForEditor(url) { completed, total in
+                Task { @MainActor in
+                    status.completed = max(status.completed, completed)
+                    status.total = total
+                }
+            }
+        }
+        importTask = task
         Task { @MainActor in
-            defer { importing = false }
+            defer { importing = false; importTask = nil }
             do {
-                let imported = try await Task.detached(priority: .userInitiated) {
-                    try PowerPoint.read(url, fontAvailable: { NSFont(name: $0, size: 12) != nil }) { data in
-                        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
-                              let image = PhotoStorage.thumbnail(source) else { return nil }
-                        return PhotoStorage.png(image)
-                    }
-                }.value
+                let imported = try await task.value
+                guard !task.isCancelled else { return }
                 if asNewDocument {
                     let fresh = SlidesDocument(deck: imported.deck)
                     newDocument(fresh)
@@ -1008,6 +1066,22 @@ private enum TeachingSheet: String, Identifiable {
     var id: Self { self }
 }
 
+@Observable
+private final class ImportProgress {
+    var completed = 0
+    var total: Int?
+}
+
+extension PowerPoint {
+    static func readForEditor(_ url: URL, progress: ((Int, Int) -> Void)? = nil) throws -> ImportedDeck {
+        try read(url, fontAvailable: { NSFont(name: $0, size: 12) != nil }, progress: progress) { data in
+            guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+                  let image = PhotoStorage.thumbnail(source) else { return nil }
+            return PhotoStorage.png(image)
+        }
+    }
+}
+
 private enum PhotoStorage {
     static func thumbnail(_ source: CGImageSource) -> CGImage? {
         CGImageSourceCreateThumbnailAtIndex(source, 0, [
@@ -1034,7 +1108,7 @@ private enum ExportType: String {
     var contentType: UTType {
         switch self {
         case .pdf: .pdf
-        case .powerPoint: UTType(filenameExtension: rawValue) ?? .data
+        case .powerPoint: .slidePowerPoint
         }
     }
 }

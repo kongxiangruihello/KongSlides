@@ -79,8 +79,15 @@ final class SoftwareUpdate {
             guard prompt.runModal() == .alertFirstButtonReturn else { return }
 
             didPromptForDownload = true
-            let (archive, download) = try await session.download(for: URLRequest(url: offer.downloadURL,
-                                                                                 timeoutInterval: 60))
+            let progress = UpdateProgressPanel(title: "KongSlides 软件更新")
+            let downloadProgress = UpdateDownloadProgress(expectedBytes: offer.bytes, panel: progress)
+            progress.show("正在下载更新…", fraction: 0)
+            defer { downloadProgress.finished = true; progress.dismiss() }
+            let (archive, download) = try await session.download(
+                for: URLRequest(url: offer.downloadURL, timeoutInterval: 60), delegate: downloadProgress
+            )
+            downloadProgress.finished = true
+            progress.show("正在校验安装包…")
             defer { try? FileManager.default.removeItem(at: archive) }
             guard (download as? HTTPURLResponse)?.statusCode == 200 else { throw UpdateProblem.connection }
 
@@ -98,13 +105,16 @@ final class SoftwareUpdate {
                 update = try await prepare(downloaded, offer: offer, source: app, destination: app,
                                            expected: version)
             } catch UpdateProblem.appLocation {
+                progress.dismiss()
                 guard let destination = chooseDestination(for: offer.version) else { return }
                 guard destination.path != app.path else { throw UpdateProblem.appLocation }
                 let existing = try StagedUpdate.versionAtDestination(destination)
                 if let existing, existing >= offer.version { throw UpdateProblem.destinationOccupied }
+                progress.show("正在准备安装…")
                 update = try await prepare(downloaded, offer: offer, source: app,
                                            destination: destination, expected: existing)
             }
+            progress.dismiss()
             staged = update
             offerInstallation(update)
         } catch {
@@ -175,7 +185,7 @@ final class SoftwareUpdate {
         process.arguments = [
             String(ProcessInfo.processInfo.processIdentifier), staged.source.path,
             staged.directory.path, staged.version.description, staged.destination.path,
-            staged.expected?.description ?? ""
+            staged.expected?.description ?? "", "--show-progress"
         ]
         do {
             try process.run()
@@ -197,7 +207,32 @@ final class SoftwareUpdate {
     }
 }
 
-private final class GitHubRedirects: NSObject, URLSessionTaskDelegate {
+private final class UpdateDownloadProgress: GitHubRedirects, URLSessionDownloadDelegate {
+    private let expectedBytes: Int64
+    @MainActor private weak var panel: UpdateProgressPanel?
+    @MainActor var finished = false
+
+    @MainActor
+    init(expectedBytes: Int, panel: UpdateProgressPanel) {
+        self.expectedBytes = Int64(expectedBytes)
+        self.panel = panel
+    }
+
+    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
+                    didWriteData bytesWritten: Int64, totalBytesWritten: Int64,
+                    totalBytesExpectedToWrite: Int64) {
+        let fraction = min(1, Double(totalBytesWritten) / Double(expectedBytes))
+        Task { @MainActor in
+            guard !finished else { return }
+            panel?.show("正在下载更新… \(Int(fraction * 100))%", fraction: fraction)
+        }
+    }
+
+    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
+                    didFinishDownloadingTo location: URL) {}
+}
+
+private class GitHubRedirects: NSObject, URLSessionTaskDelegate {
     private static let hosts: Set<String> = [
         "github.com", "api.github.com", "release-assets.githubusercontent.com",
         "objects.githubusercontent.com", "github-releases.githubusercontent.com"
