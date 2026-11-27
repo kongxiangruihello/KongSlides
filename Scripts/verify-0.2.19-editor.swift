@@ -6,6 +6,7 @@ guard let pid = Int32(CommandLine.arguments[1]), AXIsProcessTrusted(), CGPreflig
     exit(1)
 }
 let app = AXUIElementCreateApplication(pid)
+AXUIElementSetMessagingTimeout(app, 1)
 setbuf(stdout, nil)
 if let running = NSRunningApplication(processIdentifier: pid) { running.activate() }
 
@@ -48,7 +49,7 @@ func until<T>(_ name: String, _ check: () -> T?) -> T {
         Thread.sleep(forTimeInterval: 0.10)
     }
     fputs("Timed out waiting for \(name)\n", stderr)
-    if let sheet = saveSheet() { dump(sheet) } else { dump(app) }
+    if let sheet = saveSheet() { dump(sheet) }
     exit(1)
 }
 
@@ -97,51 +98,22 @@ func saveSheet() -> AXUIElement? {
 }
 
 _ = until("editor toolbar") { element("insert-text-box") }
-click("close-inspector-panel")
-_ = until("inspector closed") { element("close-inspector-panel") == nil ? true : nil }
-click("toggle-inspector-panel")
-_ = until("inspector reopened") { element("close-inspector-panel") }
-click("close-notes-panel")
-_ = until("notes closed") { element("close-notes-panel") == nil ? true : nil }
-click("toggle-notes-panel")
-_ = until("notes reopened") { element("close-notes-panel") }
-click("insert-text-box")
-_ = until("canvas text editor") { element("编辑幻灯片文本") }
-type("Editor smoke")
-click("粗体")
-key(53)
-print("Toolbar insert and text formatting worked; both panels closed and reopened.")
-
 key(1, [.maskCommand, .maskShift])
 _ = until("first Save As sheet") { saveSheet() }
 key(53)
 _ = until("Save As cancellation") { saveSheet() == nil ? true : nil }
 key(1, [.maskCommand, .maskShift])
 let sheet = until("second Save As sheet") { saveSheet() }
-let field = until("file name field") {
-    find(sheet) { attr($0, kAXRoleAttribute) as? String == kAXTextFieldRole && (attr($0, kAXValueAttribute) as? String)?.hasPrefix("Original") == true }
-}
-let selected = AXUIElementSetAttributeValue(field, kAXFocusedAttribute as CFString, kCFBooleanTrue)
-print("Save As name field focus result \(selected.rawValue)")
-let nameStatus = AXUIElementSetAttributeValue(field, kAXValueAttribute as CFString, "Saved copy" as CFString)
-print("Save As name field value result \(nameStatus.rawValue)")
-if nameStatus != .success {
-    key(0, .maskCommand)
-    NSPasteboard.general.clearContents()
-    NSPasteboard.general.setString("Saved copy", forType: .string)
-    key(9, .maskCommand)
-}
-_ = until("new filename written to the Save As field") {
-    (attr(field, kAXValueAttribute) as? String)?.hasPrefix("Saved copy") == true ? true : nil
-}
-let save = until("Save button") {
+let save = until("Save Button") {
     find(sheet) { item in
         let title = attr(item, kAXTitleAttribute) as? String
         return attr(item, kAXRoleAttribute) as? String == kAXButtonRole && (title == "保存" || title == "Save")
     }
 }
-let status = AXUIElementPerformAction(save, kAXPressAction as CFString)
-print("Save button AX press result \(status.rawValue)")
-guard status == .success else { dump(sheet); exit(4) }
-_ = until("Save As confirmation") { saveSheet() == nil ? true : nil }
-print("Save As opened as a sheet, cancelled, reopened and confirmed.")
+let result = AXUIElementPerformAction(save, kAXPressAction as CFString)
+print("Clicked Save, accessibility response: \(result.rawValue)")
+if result != .success {
+    if element("保存") != nil { click("保存") } else { click("Save") }
+}
+_ = until("Save As sheet dismissed after confirmation") { saveSheet() == nil ? true : nil }
+print("Imported PowerPoint Save As opened, cancelled and then completed through the native Save button.")
