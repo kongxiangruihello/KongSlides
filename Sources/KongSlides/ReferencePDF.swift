@@ -54,6 +54,9 @@ enum ReferencePDF {
         let scale: CGFloat = min(frame.width / size.width, frame.height / size.height)
         let width: Double = Double(size.width * scale)
         let height: Double = Double(size.height * scale)
+        if slide.originalPDFPage == nil {
+            slide.originalPDFPage = .init(background: slide.background, objects: slide.objects, previousRepair: slide.importReport?.repair)
+        }
         slide.background = "FFFFFF"
         slide.objects = [SlideObject(kind: .image, x: (Double(frame.width) - width) / 2,
                                      y: (Double(frame.height) - height) / 2, width: width, height: height, imageID: asset)]

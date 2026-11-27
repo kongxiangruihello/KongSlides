@@ -25,6 +25,10 @@ struct EditorFormattingToolbar: View {
     let ranges: [Range<Int>]
     let insertTextBox: () -> Void
     let update: ((inout SlideObject) -> Void) -> Void
+    let paintReady: Bool
+    let paint: () -> Void
+    @AppStorage("formatToolbarOrder") private var storedOrder = ""
+    @AppStorage("formatToolbarOverflow") private var storedOverflow = ""
     @State private var fontFamilies: [String] = []
     @State private var customSize = false
     @State private var sizeInput = ""
@@ -41,29 +45,77 @@ struct EditorFormattingToolbar: View {
         return object.paragraphIndices(in: ranges).map { values[$0] }
     }
 
+    private var order: [FormattingGroup] { FormattingGroup.decode(storedOrder, fill: true) }
+    private var overflow: Set<FormattingGroup> { Set(FormattingGroup.decode(storedOverflow, fill: false)) }
+
     var body: some View {
-        HStack(spacing: 9) {
+        HStack(spacing: 7) {
+            ScrollView(.horizontal) {
+                HStack(spacing: 5) {
+                    ForEach(order.filter { !overflow.contains($0) }) { item in
+                        group(item)
+                        rule
+                    }
+                }
+            }.scrollIndicators(.hidden)
+            if !overflow.isEmpty {
+                Button("更多格式") { showOverflow.toggle() }
+                    .popover(isPresented: $showOverflow) {
+                        VStack(alignment: .leading, spacing: 8) {
+                            ForEach(order.filter { overflow.contains($0) }) { item in
+                                HStack { group(item) }
+                            }
+                        }.padding(12)
+                    }
+            }
+        }
+        .frame(height: 36)
+        .padding(.horizontal, 14)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .onAppear {
+            if fontFamilies.isEmpty {
+                fontFamilies = NSFontManager.shared.availableFontFamilies.sorted {
+                    $0.localizedStandardCompare($1) == .orderedAscending
+                }
+            }
+        }
+        .alert("输入字号", isPresented: $customSize) {
+            TextField("8–200", text: $sizeInput)
+            Button("取消", role: .cancel) {}
+            Button("应用") {
+                if let value = Double(sizeInput.trimmingCharacters(in: .whitespaces)), (8...200).contains(value) {
+                    format { $0.size = value }
+                }
+            }
+        } message: { Text("可输入 8 到 200 磅，支持小数。") }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("常用工具")
+    }
+
+    @State private var showOverflow = false
+
+    @ViewBuilder
+    private func group(_ item: FormattingGroup) -> some View {
+        if item == .insert {
             Button(action: insertTextBox) { Label("文本框", systemImage: "textbox") }
                 .buttonStyle(.bordered)
                 .help("添加文本框（⌘⇧T）")
                 .accessibilityIdentifier("insert-text-box")
                 .keyboardShortcut("t", modifiers: [.command, .shift])
-            rule
+        } else {
             HStack(spacing: 4) {
-                tool("项目符号", icon: "list.bullet", active: selectedBullets(numbered: false)) { bullets(numbered: false) }
-                tool("编号", icon: "list.number", active: selectedBullets(numbered: true)) { bullets(numbered: true) }
-            }
-            .disabled(object == nil)
-            .help(object == nil ? "先选中文本框，再设置项目符号或编号" : "")
-            rule
-            ScrollView(.horizontal) {
-                HStack(spacing: 4) {
+                switch item {
+                case .insert: EmptyView()
+                case .lists:
+                    tool("项目符号", icon: "list.bullet", active: selectedBullets(numbered: false)) { bullets(numbered: false) }
+                    tool("编号", icon: "list.number", active: selectedBullets(numbered: true)) { bullets(numbered: true) }
+                case .font:
                     fontMenu
                     sizeMenu
                     tool("增大字号", icon: "textformat.size.larger") { changeSize(by: true) }
                     tool("减小字号", icon: "textformat.size.smaller") { changeSize(by: false) }
                     tool("清除文字格式", icon: "eraser") { clearFormatting() }
-                    rule
+                case .emphasis:
                     tool("粗体", icon: "bold", active: isActive { $0.bold }) {
                         let value = !isActive { $0.bold }
                         format { $0.bold = value }
@@ -89,6 +141,7 @@ struct EditorFormattingToolbar: View {
                         Button("全部大写") { update { $0.changeLetterCase(in: textRanges, uppercase: true) } }
                         Button("全部小写") { update { $0.changeLetterCase(in: textRanges, uppercase: false) } }
                     }
+                case .colors:
                     compactMenu("文字高亮", icon: "highlighter", color: primary?.characterStyle?.highlight ?? "FFE766") {
                         Button("取消高亮") { changeCharacter { $0.highlight = nil } }
                         colorChoices([("黄色", "FFE766"), ("绿色", "B7EB90"), ("浅蓝", "A9DBFA"),
@@ -102,10 +155,9 @@ struct EditorFormattingToolbar: View {
                             format { $0.color = value }
                         }
                     }
-                    rule
+                case .alignment:
                     tool("减少缩进", icon: "decrease.indent") { indent(by: -16) }
                     tool("增加缩进", icon: "increase.indent") { indent(by: 16) }
-                    rule
                     alignment("左对齐", "text.alignleft", .left)
                     alignment("居中", "text.aligncenter", .center)
                     alignment("右对齐", "text.alignright", .right)
@@ -117,32 +169,11 @@ struct EditorFormattingToolbar: View {
                         lineSpacing("1.5 倍行距", 1.5)
                         lineSpacing("双倍行距", 2)
                     }
+                case .paint:
+                    tool(paintReady ? "应用格式刷" : "复制文字格式", icon: "paintbrush", active: paintReady, action: paint)
                 }
-                .disabled(object == nil)
-            }
-            .scrollIndicators(.hidden)
+            }.disabled(object == nil)
         }
-        .frame(height: 36)
-        .padding(.horizontal, 14)
-        .background(Color(nsColor: .controlBackgroundColor))
-        .onAppear {
-            if fontFamilies.isEmpty {
-                fontFamilies = NSFontManager.shared.availableFontFamilies.sorted {
-                    $0.localizedStandardCompare($1) == .orderedAscending
-                }
-            }
-        }
-        .alert("输入字号", isPresented: $customSize) {
-            TextField("8–200", text: $sizeInput)
-            Button("取消", role: .cancel) {}
-            Button("应用") {
-                if let value = Double(sizeInput.trimmingCharacters(in: .whitespaces)), (8...200).contains(value) {
-                    format { $0.size = value }
-                }
-            }
-        } message: { Text("可输入 8 到 200 磅，支持小数。") }
-        .accessibilityElement(children: .contain)
-        .accessibilityLabel("常用工具")
     }
 
     private var rule: some View { Divider().frame(height: 20).padding(.horizontal, 3) }
@@ -297,5 +328,70 @@ struct EditorFormattingToolbar: View {
                 paragraph.lineHeight = nil
             } }
         }
+    }
+}
+
+
+enum FormattingGroup: String, CaseIterable, Identifiable {
+    case insert = "文本框", lists = "项目符号与编号", font = "字体与字号", emphasis = "字形与间距"
+    case colors = "颜色与高亮", alignment = "对齐与段落", paint = "格式刷"
+    var id: Self { self }
+
+    static func decode(_ encoded: String, fill: Bool) -> [Self] {
+        var result: [Self] = []
+        for raw in encoded.split(separator: ",") {
+            if let item = Self(rawValue: String(raw)), !result.contains(item) { result.append(item) }
+        }
+        if fill { result += allCases.filter { !result.contains($0) } }
+        return result
+    }
+
+    static func encode(_ items: [Self]) -> String { items.map(\.rawValue).joined(separator: ",") }
+}
+
+struct FormattingToolbarSettings: View {
+    @AppStorage("formatToolbarOrder") private var storedOrder = ""
+    @AppStorage("formatToolbarOverflow") private var storedOverflow = ""
+    @Environment(\.dismiss) private var dismiss
+    @State private var order = FormattingGroup.allCases
+    @State private var hidden = Set<FormattingGroup>()
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("自定义编辑工具栏").font(.title2.bold())
+            Text("拖动工具组改变顺序。可将用得少的工具组放入「更多格式」。").font(.caption)
+            List(order) { group in
+                HStack {
+                    Image(systemName: "line.3.horizontal").foregroundStyle(.secondary)
+                    Text(group.rawValue)
+                    Spacer()
+                    Toggle("收进更多", isOn: Binding(get: { hidden.contains(group) }, set: {
+                        if $0 { hidden.insert(group) } else { hidden.remove(group) }
+                    }))
+                }
+                .draggable(group.rawValue)
+                .dropDestination(for: String.self) { values, _ in
+                    guard let value = values.first, let from = FormattingGroup(rawValue: value),
+                          let start = order.firstIndex(of: from), let end = order.firstIndex(of: group),
+                          start != end else { return false }
+                    order.move(fromOffsets: IndexSet(integer: start), toOffset: end > start ? end + 1 : end)
+                    return true
+                }
+            }
+            HStack {
+                Button("恢复默认") { order = FormattingGroup.allCases; hidden = [] }
+                Spacer()
+                Button("取消") { dismiss() }.keyboardShortcut(.cancelAction)
+                Button("保存布局") {
+                    storedOrder = FormattingGroup.encode(order)
+                    storedOverflow = FormattingGroup.encode(order.filter { hidden.contains($0) })
+                    dismiss()
+                }.keyboardShortcut(.defaultAction)
+            }
+        }.padding(18).frame(width: 430, height: 360)
+         .onAppear {
+             order = FormattingGroup.decode(storedOrder, fill: true)
+             hidden = Set(FormattingGroup.decode(storedOverflow, fill: false))
+         }
     }
 }

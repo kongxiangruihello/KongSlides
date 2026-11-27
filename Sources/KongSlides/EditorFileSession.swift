@@ -62,6 +62,7 @@ final class EditorFileSession {
     private(set) var openTiming: OpenTiming?
     private(set) var progress = ImportProgress()
     var error: String?
+    var exportReceipt: ExportReceipt?
     var pageJumpRequest = UUID()
     enum HomeAction { case preflight, rehearsal, classroomPackage }
     struct HomeActionRequest: Equatable {
@@ -225,6 +226,7 @@ final class EditorFileSession {
         guard document.deck != value.deck else { return }
         let previous = document
         var value = value
+        value.deck.refreshCourseFooters()
         for index in value.deck.slides.indices where value.deck.slides[index].objects.contains(where: {
             $0.connector?.startAttachment != nil || $0.connector?.endAttachment != nil
         }) {
@@ -431,7 +433,7 @@ final class EditorFileSession {
             if response == .alertFirstButtonReturn { await requestSave(asCopy: true, in: window) }
             if response == .alertThirdButtonReturn { open(destination, discardEditsToReload: true) }
         } catch {
-            self.error = "无法保存「\(destination.lastPathComponent)」。\n\(error.localizedDescription)"
+            exportReceipt = .init(url: destination, success: false, report: [error.localizedDescription])
         }
     }
 
@@ -459,11 +461,13 @@ final class EditorFileSession {
         defer { saving = false }
         let snapshot = document
         if format == .powerPoint {
-            try await Task.detached(priority: .userInitiated) {
+            let report = try await Task.detached(priority: .userInitiated) {
                 let scoped = destination.startAccessingSecurityScopedResource()
                 defer { if scoped { destination.stopAccessingSecurityScopedResource() } }
                 try PowerPoint.write(snapshot.deck, to: destination)
+                return ClassroomExport.checkPowerPoint(snapshot.deck, at: destination)
             }.value
+            exportReceipt = .init(url: destination, report: report)
             self.error = nil
             return
         }
@@ -480,6 +484,7 @@ final class EditorFileSession {
             return NativeDocumentStamp(at: destination)
         }.value
         completeSave(to: destination, deck: snapshot.deck, stamp: stamp)
+        exportReceipt = .init(url: destination)
     }
 
     private func makeSavePanel(format: DeckSaveFormat = .native) -> NSSavePanel {

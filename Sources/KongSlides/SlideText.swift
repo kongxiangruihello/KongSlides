@@ -210,3 +210,60 @@ enum SlideText {
         return result
     }
 }
+
+extension SlideText {
+    static func splitOverflow(_ object: SlideObject, continuationHeight: Double) -> (first: SlideObject, continuations: [SlideObject])? {
+        let source = Array(object.text)
+        guard source.count > 1, isClipped(object) else { return nil }
+
+        func portion(_ lower: Int, _ upper: Int, template: SlideObject) -> SlideObject {
+            var page = template
+            let start = String(source.prefix(lower)).utf16.count
+            let value = String(source[lower..<upper])
+            let end = start + value.utf16.count
+            page.text = value
+            page.textRuns = object.textRuns?.compactMap { style in
+                let low = max(start, style.start)
+                let high = min(end, style.end)
+                guard low < high else { return nil }
+                var run = style
+                run.start = low - start
+                run.length = high - low
+                return run
+            }
+            if var layout = object.textLayout {
+                let firstParagraph = source[..<lower].count(where: { $0 == "\n" })
+                layout.paragraphs = Array(layout.paragraphs.dropFirst(firstParagraph).prefix(value.components(separatedBy: "\n").count))
+                page.textLayout = layout
+            }
+            return page
+        }
+
+        var result: [SlideObject] = []
+        var start = 0
+        var template = object
+        while start < source.count {
+            var low = start + 1
+            var high = source.count
+            var fit = start
+            while low <= high {
+                let candidate = (low + high) / 2
+                if isClipped(portion(start, candidate, template: template)) { high = candidate - 1 }
+                else { fit = candidate; low = candidate + 1 }
+            }
+            guard fit > start else { return nil }
+            if fit < source.count,
+               let boundary = source[(start + (fit - start) / 2)..<fit].lastIndex(where: { $0.isWhitespace }),
+               boundary > start {
+                fit = boundary + 1
+            }
+            result.append(portion(start, fit, template: template))
+            start = fit
+            template.id = UUID()
+            template.y = 24
+            template.height = max(12, continuationHeight)
+        }
+        guard let first = result.first, result.count > 1 else { return nil }
+        return (first, Array(result.dropFirst()))
+    }
+}

@@ -20,6 +20,7 @@ struct SlideSurface: View {
     let slide: Slide
     let images: [UUID: Data]
     var omittedObject: UUID? = nil
+    var hiddenObjects: Set<UUID> = []
     var canvas: SlideCanvas = .widescreen
     var imageCache: SlideImageCache? = nil
     var thumbnail = false
@@ -31,7 +32,7 @@ struct SlideSurface: View {
             var imageTime = 0.0
             graphics.withCGContext { context in
                 var visible = slide
-                if let omittedObject { visible.objects.removeAll { $0.id == omittedObject } }
+                visible.objects.removeAll { $0.id == omittedObject || hiddenObjects.contains($0.id) }
                 context.translateBy(x: 0, y: size.height)
                 context.scaleBy(x: size.width / canvas.width, y: -size.height / canvas.height)
                 SlideDrawing.draw(visible, images: images, in: context, canvas: canvas,
@@ -58,6 +59,20 @@ struct EditorView: View {
     @State private var slideID: UUID?
     @State private var imageCache = SlideImageCache()
     @State private var showOpenTiming = false
+    @State private var classroomSheet: ClassroomToolSheet?
+    @State private var exportReceipt: ExportReceipt?
+    @State private var detailedReceipt: ExportReceipt?
+    @State private var slideFilter = ClassroomSlideFilter.all
+    @State private var workspaceLayout = ClassroomWorkspaceLayout.full
+    @State private var styleBrush: SlideTextRun?
+    @State private var hiddenObjects: Set<UUID> = []
+    @State private var renameTarget: SlideObject?
+    @State private var objectName = ""
+    @AppStorage("snapCanvasObjects") private var snapEnabled = true
+    @State private var canvasSnap: CanvasSnap?
+    @State private var draggingPage: UUID?
+    @State private var pageDropTarget: UUID?
+    @State private var edgeScroll: Task<Void, Never>?
     @State private var selectedPageIDs: Set<UUID> = []
     @State private var pageSelectionAnchor: UUID?
     @State private var pageToReveal: UUID?
@@ -144,7 +159,9 @@ struct EditorView: View {
                     selectedTextRanges.filter { $0.upperBound <= object.text.utf16.count }
                 } ?? [],
                 insertTextBox: insertTextBox,
-                update: formatSelectedText
+                update: formatSelectedText,
+                paintReady: styleBrush != nil,
+                paint: useStyleBrush
             )
             if session.saving {
                 HStack(spacing: 8) {
@@ -174,6 +191,20 @@ struct EditorView: View {
             }
             Divider()
             editorPanels
+            if let receipt = exportReceipt {
+                Divider()
+                HStack {
+                    Image(systemName: receipt.success ? "checkmark.circle" : "exclamationmark.triangle")
+                    Text(receipt.success ? "已保存 \(receipt.url.lastPathComponent)" : "未能写入 \(receipt.url.lastPathComponent)")
+                        .lineLimit(1).help(receipt.url.path)
+                    Spacer()
+                    if receipt.success {
+                        Button("在 Finder 中显示") { NSWorkspace.shared.activateFileViewerSelecting([receipt.url]) }
+                    }
+                    Button("详情") { detailedReceipt = receipt }
+                    EditorPanelCloseButton(title: "关闭写入结果", identifier: "close-export-receipt") { exportReceipt = nil }
+                }.padding(.horizontal, 12).padding(.vertical, 4)
+            }
         }
         .background(Color(nsColor: .windowBackgroundColor))
         .background(EditorKeyMonitor(handle: handleShortcut))
@@ -187,6 +218,7 @@ struct EditorView: View {
         .onDisappear {
             importTask?.cancel()
             recoveryPending?.cancel()
+            edgeScroll?.cancel()
             RecoverySession.shared.close(recoveryID)
         }
         .dropDestination(for: URL.self) { urls, _ in
@@ -292,9 +324,18 @@ struct EditorView: View {
             }
         }
         .sheet(item: $savedSnapshot) { snapshot in
-            DeckSnapshotView(snapshot: snapshot) { selection in
+            DeckSnapshotView(snapshot: snapshot, current: deck) { selection, notesOnly in
                 do {
-                    let restored = try selection.map { try snapshot.restoring($0, into: deck) } ?? snapshot.deck
+                    var restored = deck
+                    if notesOnly, let selection {
+                        for index in restored.slides.indices where selection.contains(restored.slides[index].id) {
+                            if let old = snapshot.deck.slides.first(where: { $0.id == restored.slides[index].id }) {
+                                restored.slides[index].speakerNotes = old.speakerNotes
+                            }
+                        }
+                    } else {
+                        restored = try selection.map { try snapshot.restoring($0, into: deck) } ?? snapshot.deck
+                    }
                     let current = restored.slides.first(where: { $0.id == slide.id }) ?? restored.slides.first
                     document.deck = restored
                     search = ""
@@ -319,6 +360,25 @@ struct EditorView: View {
                 }
             }
         }
+        .sheet(item: $classroomSheet) { classroomTool($0) }
+        .sheet(item: $detailedReceipt) { ExportReceiptView(receipt: $0) }
+        .onChange(of: session.exportReceipt?.id) {
+            if let receipt = session.exportReceipt {
+                session.exportReceipt = nil
+                exportReceipt = receipt
+            }
+        }
+        .alert("重命名对象", isPresented: Binding(get: { renameTarget != nil }, set: { if !$0 { renameTarget = nil } })) {
+            TextField("名称", text: $objectName)
+            Button("取消", role: .cancel) { renameTarget = nil }
+            Button("保存") {
+                if let target = renameTarget {
+                    let value = objectName.trimmingCharacters(in: .whitespacesAndNewlines)
+                    objectBinding(target.id, \.objectName, fallback: nil).wrappedValue = value.isEmpty ? nil : value
+                }
+                renameTarget = nil
+            }
+        }
         .alert("删除 \(pendingDeletion.count) 页幻灯片？", isPresented: Binding(
             get: { !pendingDeletion.isEmpty }, set: { if !$0 { pendingDeletion = [] } }
         )) {
@@ -333,6 +393,7 @@ struct EditorView: View {
             if selection == nil { objectID = nil }
             additionalObjects.removeAll()
             editingID = nil
+            canvasSnap = nil
         }
         .onChange(of: objectID) {
             if editingID != objectID {
@@ -352,29 +413,31 @@ struct EditorView: View {
     private var editorPanels: some View {
         GeometryReader { geometry in
             let widths = EditorPanelWidths(windowWidth: geometry.size.width, preferredLeft: sidebarWidth,
-                                          preferredRight: showInspector ? inspectorWidth : nil)
+                                          preferredRight: showInspector && workspaceLayout == .full ? inspectorWidth : nil)
             HStack(spacing: 0) {
-                sidebar.frame(width: widths.width(.left, translation: sidebarDrag))
-                EditorPanelResizeHandle(title: "拖动调整缩略图栏宽度", identifier: "resize-slide-sidebar",
-                                        translation: $sidebarDrag) { offset in
-                    let width = widths.width(.left, translation: offset)
-                    if width != widths.left { sidebarWidth = width }
+                if workspaceLayout == .full {
+                    sidebar.frame(width: widths.width(.left, translation: sidebarDrag))
+                    EditorPanelResizeHandle(title: "拖动调整缩略图栏宽度", identifier: "resize-slide-sidebar",
+                                            translation: $sidebarDrag) { offset in
+                        let width = widths.width(.left, translation: offset)
+                        if width != widths.left { sidebarWidth = width }
+                    }
+                    .frame(width: EditorPanelWidths.dividerWidth)
+                    .frame(maxHeight: .infinity)
+                    .zIndex(1)
                 }
-                .frame(width: EditorPanelWidths.dividerWidth)
-                .frame(maxHeight: .infinity)
-                .zIndex(1)
                 VStack(spacing: 0) {
-                    workspace
-                    if showNotes {
+                    if workspaceLayout != .notes { workspace }
+                    if workspaceLayout == .notes || (showNotes && workspaceLayout == .full) {
                         Divider()
                         notes
                     }
-                    if let reviewMode {
+                    if workspaceLayout == .full, let reviewMode {
                         Divider()
                         reviewPanel(reviewMode)
                     }
                 }
-                if showInspector {
+                if showInspector && workspaceLayout == .full {
                     EditorPanelResizeHandle(title: "拖动调整版面属性宽度", identifier: "resize-layout-inspector",
                                             translation: $inspectorDrag) { offset in
                         let width = widths.width(.right, translation: offset)
@@ -452,6 +515,10 @@ struct EditorView: View {
                     Button("学生配布版 · 每页 2 张…") { exportTeachingPDF(.studentTwo) }
                     Button("学生配布版 · 每页 3 张…") { exportTeachingPDF(.studentThree) }
                 }
+                Divider()
+                Button("选中页另存 PPTX…") { exportSelected(selectedPages, format: .powerPoint) }.disabled(selectedPages.isEmpty)
+                Button("选中页导出 PDF…") { exportSelected(selectedPages, format: .projection) }.disabled(selectedPages.isEmpty)
+                Button("教室兼容 PPTX 副本…") { classroomSheet = .compatibility }
             } label: { Label("导出", systemImage: "square.and.arrow.up") }
             .fixedSize()
             .disabled(importing || session.opening || session.saving)
@@ -462,6 +529,18 @@ struct EditorView: View {
                         session.toggleFavorite(file)
                     }
                 }
+                Button("查找与替换…") { classroomSheet = .replace }.keyboardShortcut("f", modifiers: [.command, .shift])
+                Button("批量调整所选页…") { classroomSheet = .batch }.disabled(selectedPages.isEmpty)
+                Button("自动页码与课程页脚…") { classroomSheet = .footer }
+                Button("自定义编辑工具栏…") { classroomSheet = .toolbar }
+                Menu("编辑布局") {
+                    ForEach(ClassroomWorkspaceLayout.allCases) { mode in
+                        Button(mode.rawValue) { workspaceLayout = mode }
+                    }
+                }
+                Button("长课件性能测量…") { classroomSheet = .benchmark }
+                Button("自定义放映顺序…") { classroomSheet = .shows }
+                Button("课后回顾…") { classroomSheet = .review }.disabled(deck.classroomReview == nil)
                 Button("查看打开耗时…") { showOpenTiming = true }.disabled(session.openTiming == nil)
                 Button("查看 PPTX 导入报告") { reviewMode = .imported }
                     .disabled(!deck.slides.contains { $0.importReport != nil })
@@ -475,11 +554,7 @@ struct EditorView: View {
             .fixedSize()
             Button(action: runPreflight) { Label("放映前检查", systemImage: "checklist") }
                 .disabled(checkingPreflight)
-            Button {
-                if !presenter.start(deck: deck, at: index) {
-                    linkedError = "课件中只有备用页。请先将至少一页设为正片。"
-                }
-            } label: { Label("放映", systemImage: "play.fill") }
+            Button { startClassroomShow() } label: { Label("放映", systemImage: "play.fill") }
             .buttonStyle(.borderedProminent)
             .keyboardShortcut(.return, modifiers: [.command, .option])
         }
@@ -514,15 +589,20 @@ struct EditorView: View {
                 .textFieldStyle(.roundedBorder)
                 .accessibilityIdentifier("sidebar-search")
                 .padding(.horizontal, 12)
+            Picker("筛选", selection: $slideFilter) {
+                ForEach(ClassroomSlideFilter.allCases) { filter in Text(filter.rawValue).tag(filter) }
+            }.padding(.horizontal, 12)
             ScrollViewReader { scroll in
                 List {
                     ForEach(visibleSlides) { row in
                         slideRow(row).id(row.id)
                     }
-                    .onMove(perform: search.isEmpty && collapsedSections.isEmpty ? reorder : nil)
+                    .onMove(perform: canReorderRows ? reorder : nil)
                 }
                 .listStyle(.sidebar)
                 .accessibilityIdentifier("sidebar-list")
+                .overlay(alignment: .top) { if draggingPage != nil { scrollEdge(.top, using: scroll) } }
+                .overlay(alignment: .bottom) { if draggingPage != nil { scrollEdge(.bottom, using: scroll) } }
                 .onChange(of: pageToReveal) { _, target in
                     guard let target else { return }
                     if let range = sectionRange(target) {
@@ -547,12 +627,11 @@ struct EditorView: View {
     }
 
     private var filteredSlides: [Slide] {
-        guard !search.isEmpty else { return deck.slides }
-        return deck.slides.filter { SlideSearchHit.first(on: $0, query: search) != nil }
+        deck.slides.filter { slideFilter.includes($0) && (search.isEmpty || SlideSearchHit.first(on: $0, query: search) != nil) }
     }
 
     private var visibleSlides: [Slide] {
-        guard search.isEmpty, !collapsedSections.isEmpty else { return filteredSlides }
+        guard search.isEmpty, slideFilter == .all, !collapsedSections.isEmpty else { return filteredSlides }
         var sectionStart: Slide?
         return deck.slides.filter { row in
             if row.section != sectionStart?.section || sectionStart == nil { sectionStart = row }
@@ -618,8 +697,20 @@ struct EditorView: View {
             .accessibilityIdentifier("slide-thumbnail-" + row.id.uuidString)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        .modifier(ClassroomRowDrag(enabled: canReorderRows, highlighted: pageDropTarget == row.id,
+                                    provider: { startPageDrag(row.id) },
+                                    entered: { pageDropTarget = $0 ? row.id : nil },
+                                    dropped: { dropPage(before: row.id) }))
         .contextMenu {
             let pages = selectedPages.contains(row.id) ? selectedPages : [row.id]
+            Button("所选页另存为 PPTX…") { exportSelected(pages, format: .powerPoint) }
+            Button("所选页导出为 PDF…") { exportSelected(pages, format: .projection) }
+            Menu("移到章节") {
+                ForEach(chapterStarts) { chapter in
+                    Button(chapter.section) { movePages(pages, to: chapter.id) }
+                }
+            }.disabled(chapterStarts.isEmpty)
+            Divider()
             if pages.count > 1 {
                 Button("复制所选 \(pages.count) 页") { duplicateSlides(pages) }
                 Button("所选页整体上移") { moveSlides(pages, by: -1) }
@@ -661,7 +752,7 @@ struct EditorView: View {
                 Color(nsColor: .underPageBackgroundColor)
                     .onTapGesture { clearObjectSelection() }
                 ZStack(alignment: .topLeading) {
-                    SlideSurface(slide: slide, images: deck.images, omittedObject: editingID, canvas: deck.pageCanvas,
+                    SlideSurface(slide: slide, images: deck.images, omittedObject: editingID, hiddenObjects: hiddenObjects, canvas: deck.pageCanvas,
                                  imageCache: imageCache, didDraw: awaitingFirstDraw ? firstCanvasDraw : nil)
                         .accessibilityIdentifier("editor-canvas-" + slide.id.uuidString)
                         .onTapGesture { clearObjectSelection() }
@@ -673,9 +764,21 @@ struct EditorView: View {
                             }
                             Button("插入直线") { addConnector(arrow: .none) }
                             Button("插入箭头") { addConnector(arrow: .triangle) }
+                            Toggle("启用参考线与吸附", isOn: $snapEnabled)
+                            Button("显示所有临时隐藏对象") { hiddenObjects = [] }.disabled(hiddenObjects.isEmpty)
                         }
-                    ForEach(slide.objects.filter { !$0.isLocked }) { object in
+                    ForEach(slide.objects.filter { !$0.isLocked && !hiddenObjects.contains($0.id) }) { object in
                         objectOverlay(object, scale: scale)
+                    }
+                    if let guide = canvasSnap {
+                        if let x = guide.x {
+                            Rectangle().fill(Color.accentColor).frame(width: 1, height: deck.pageCanvas.height * scale)
+                                .position(x: x * scale, y: deck.pageCanvas.height * scale / 2).allowsHitTesting(false)
+                        }
+                        if let y = guide.y {
+                            Rectangle().fill(Color.accentColor).frame(width: deck.pageCanvas.width * scale, height: 1)
+                                .position(x: deck.pageCanvas.width * scale / 2, y: y * scale).allowsHitTesting(false)
+                        }
                     }
                     if let objectMarquee {
                         Rectangle().fill(Color.accentColor.opacity(0.10))
@@ -684,7 +787,7 @@ struct EditorView: View {
                             .position(x: objectMarquee.midX * scale, y: objectMarquee.midY * scale)
                             .allowsHitTesting(false)
                     }
-                    if let selection, editingID == nil, selectedObjects.count < 2, !slide.objects[selection].isLocked {
+                    if let selection, editingID == nil, selectedObjects.count < 2, !slide.objects[selection].isLocked, !hiddenObjects.contains(slide.objects[selection].id) {
                         let object = slide.objects[selection]
                         SlideResizeHandles(frame: object.frame, scale: scale, proportional: object.kind == .image) { frame in
                             changeObjectFrame(object.id, to: frame)
@@ -776,14 +879,16 @@ struct EditorView: View {
         let members = slide.objects.filter { selected.contains($0.id) }
         guard let left = members.map(\.x).min(), let right = members.map(\.x).max(),
               let top = members.map(\.y).min(), let bottom = members.map(\.y).max() else { return }
-        let dx = Double(delta.width).clamped((-10_000 - left)...(10_000 - right))
-        let dy = Double(delta.height).clamped((-10_000 - top)...(10_000 - bottom))
+        let adjusted = snap(for: id, delta: delta).delta
+        let dx = Double(adjusted.width).clamped((-10_000 - left)...(10_000 - right))
+        let dy = Double(adjusted.height).clamped((-10_000 - top)...(10_000 - bottom))
         var updated = slide
         for index in updated.objects.indices where selected.contains(updated.objects[index].id) {
             updated.objects[index].x += dx
             updated.objects[index].y += dy
         }
         document.deck.slides[index] = updated
+        canvasSnap = nil
     }
 
     private func alignObjects(horizontal: Bool) {
@@ -836,6 +941,7 @@ struct EditorView: View {
                 .id(object.id)
                 .background(Color(nsColor: Palette.color(slide.background)))
                 .frame(width: width, height: height)
+                .overlay(alignment: .topTrailing) { overflowIndicator(object) }
                 .overlay(Rectangle().strokeBorder(Color.accentColor, lineWidth: 2).allowsHitTesting(false))
                 .position(x: object.x * scale + width / 2, y: object.y * scale + height / 2)
                 .zIndex(1)
@@ -857,10 +963,14 @@ struct EditorView: View {
                               }
                               if object.kind == .table { editTable = object }
                           },
+                          guide: { offset in
+                              canvasSnap = snap(for: object.id, delta: CGSize(width: offset.width / scale, height: offset.height / scale))
+                          },
                           move: { offset in
                               moveObjects(dragged: object.id, by: CGSize(width: offset.width / scale, height: offset.height / scale))
                           })
                 .frame(width: width, height: height)
+                .overlay(alignment: .topTrailing) { if objectID == object.id { overflowIndicator(object) } }
                 .position(x: object.x * scale + width / 2, y: object.y * scale + height / 2)
         }
     }
@@ -889,7 +999,8 @@ struct EditorView: View {
             TextEditor(text: slideBinding(\.speakerNotes))
                 .font(.system(size: notesFontSize))
                 .scrollContentBackground(.hidden)
-                .frame(height: (notesHeight + notesResize).clamped(72...260))
+                .frame(minHeight: workspaceLayout == .notes ? 240 : (notesHeight + notesResize).clamped(72...260),
+                       maxHeight: workspaceLayout == .notes ? .infinity : (notesHeight + notesResize).clamped(72...260))
                 .accessibilityLabel("逐字讲稿")
                 .accessibilityIdentifier("editor-notes-" + slide.id.uuidString)
         }
@@ -917,6 +1028,10 @@ struct EditorView: View {
             VStack(alignment: .leading, spacing: 14) {
                 Button("幻灯片尺寸…") { canvasSheet = true }
                 Button("学术引文与出处…") { citationSheet = true }
+                Toggle("答案页／仅教师使用", isOn: Binding(get: { slide.teacherOnly == true }, set: {
+                    slideBinding(\.teacherOnly).wrappedValue = $0 ? true : nil
+                }))
+                if slide.originalPDFPage != nil { Button("恢复 PDF 修复前的可编辑对象", action: restorePDFPage) }
                 Toggle("课堂书签", isOn: Binding(get: { slide.bookmarked == true },
                                                    set: { slideBinding(\.bookmarked).wrappedValue = $0 ? true : nil }))
                 Toggle("备用页", isOn: Binding(get: { slide.isBackup }, set: { setBackup($0, for: [slide.id]) }))
@@ -1009,7 +1124,7 @@ struct EditorView: View {
                         Button {
                             chooseObject(object.id, extend: !object.isLocked && NSEvent.modifierFlags.contains(.shift))
                         } label: {
-                            Label(object.label, systemImage: object.isLocked ? "lock" : object.kind == .text ? "textformat" :
+                            Label(object.label, systemImage: hiddenObjects.contains(object.id) ? "eye.slash" : object.isLocked ? "lock" : object.kind == .text ? "textformat" :
                                     object.kind == .image ? "photo" : object.kind == .table ? "tablecells" :
                                     object.kind == .connector ? "arrow.up.right" : "rectangle")
                                 .lineLimit(1)
@@ -1019,6 +1134,21 @@ struct EditorView: View {
                         .padding(5)
                         .background(objectID == object.id ? Color.accentColor.opacity(0.12) : .clear,
                                     in: .rect(cornerRadius: 4))
+                        .contextMenu {
+                            Button("重命名对象…") { objectName = object.objectName ?? ""; renameTarget = object }
+                            Button(hiddenObjects.contains(object.id) ? "显示对象" : "临时隐藏对象") {
+                                if !hiddenObjects.insert(object.id).inserted { hiddenObjects.remove(object.id) }
+                                if objectID == object.id { clearObjectSelection() }
+                            }
+                            Toggle("教师专用批注", isOn: Binding(get: { object.teacherOnly == true }, set: {
+                                objectBinding(object.id, \.teacherOnly, fallback: nil).wrappedValue = $0 ? true : nil
+                            }))
+                        }
+                        .draggable(object.id.uuidString)
+                        .dropDestination(for: String.self) { values, _ in
+                            guard let value = values.first, let id = UUID(uuidString: value) else { return false }
+                            return moveLayer(id, onto: object.id)
+                        }
                     }
                 }
             }
@@ -1305,7 +1435,7 @@ struct EditorView: View {
 
     private func editorPage(_ direction: Int) -> UUID? {
         deck.editorPage(after: index, direction: direction,
-                        matching: search.isEmpty ? nil : Set(filteredSlides.map(\.id)))
+                        matching: search.isEmpty && slideFilter == .all ? nil : Set(filteredSlides.map(\.id)))
     }
 
     private func stepEditorPage(_ direction: Int) {
@@ -1845,6 +1975,10 @@ struct EditorView: View {
     }
 
     private func exportTeachingPDF(_ format: TeachingPDF.Format) {
+        if format != .teacher {
+            classroomSheet = format == .studentTwo ? .studentTwo : .studentThree
+            return
+        }
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.pdf]
         panel.nameFieldStringValue = "\(session.name)-\(format.label).pdf"
@@ -1857,7 +1991,8 @@ struct EditorView: View {
                 try await Task.detached(priority: .userInitiated) {
                     try TeachingPDF.write(snapshot, format: format, includeBackups: includeBackups, to: url)
                 }.value
-            } catch { linkedError = "无法导出 PDF。\n\(error.localizedDescription)" }
+                exportReceipt = .init(url: url)
+            } catch { exportReceipt = .init(url: url, success: false, report: [error.localizedDescription]) }
         }
     }
 
@@ -1867,10 +2002,317 @@ struct EditorView: View {
         panel.nameFieldStringValue = session.name + ".pdf"
         let backupOption = backupExportOption(for: panel)
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        do {
-            try SlideDrawing.pdf(deck, includeBackups: backupOption?.state == .on, to: url)
-        } catch { linkedError = error.localizedDescription }
+        let includeBackups = backupOption?.state == .on
+        let input = deck
+        writeExport(at: url) {
+            try SlideDrawing.pdf(input, includeBackups: includeBackups, to: url)
+            return []
+        }
     }
+    @ViewBuilder
+    private func classroomTool(_ tool: ClassroomToolSheet) -> some View {
+        switch tool {
+        case .replace:
+            let chapter = sectionRange(slide.id).map { Set(deck.slides[$0].map(\.id)) } ?? [slide.id]
+            ReplaceDeckTextView(deck: deck, current: slide.id, chapter: chapter) { matches, replacement in
+                var changed = deck
+                changed.replace(matches, with: replacement)
+                document.deck = changed
+            }
+        case .batch:
+            let pages = selectedPages
+            let names = deck.slides.enumerated().compactMap { index, page in
+                pages.contains(page.id) ? "\(index + 1)  \(page.title)" : nil
+            }
+            BatchSlideStyleView(pages: names) { size, color, background, footer in
+                var changed = deck
+                changed.applyBatchStyle(to: pages, titleSize: size, bodyColor: color, background: background, showFooter: footer)
+                document.deck = changed
+            }
+        case .footer:
+            CourseFooterView(deck: deck, current: index, apply: { document.deck.courseFooter = $0 },
+                             settings: deck.courseFooter ?? .init(course: session.name), enabled: deck.courseFooter != nil)
+        case .shows:
+            ClassroomShowLibrary(deck: deck, selected: deck.slides.filter { selectedPages.contains($0.id) }.map(\.id),
+                                 update: { document.deck.classroomShows = $0 }, start: { show in
+                Task { @MainActor in startClassroomShow(show) }
+            }, shows: deck.classroomShows ?? [])
+        case .review:
+            if let review = deck.classroomReview {
+                ClassroomReviewView(review: review, deck: deck) { id in
+                    document.deck.classroomReview?.resumePage = id
+                    slideFilter = .all
+                    search = ""
+                    selectPages([id])
+                }
+            }
+        case .compatibility:
+            ClassroomCompatibilityView(deck: deck) { fonts, replacement, pages in
+                Task { @MainActor in exportCompatibility(fonts: fonts, replacement: replacement, flattened: pages) }
+            }
+        case .studentTwo, .studentThree:
+            let format: TeachingPDF.Format = tool == .studentTwo ? .studentTwo : .studentThree
+            StudentHandoutPreview(deck: deck, format: format) { data in
+                Task { @MainActor in saveHandout(data, title: format.label) }
+            }
+        case .benchmark: PerformanceBenchmarkView(deck: deck)
+        case .toolbar: FormattingToolbarSettings()
+        }
+    }
+
+    private func startClassroomShow(_ show: ClassroomShow? = nil) {
+        let sourceID = documentIdentity
+        let resume = deck.classroomReview?.resumePage
+        let start = resume.flatMap { page in deck.slides.firstIndex { $0.id == page } } ?? index
+        if !presenter.start(deck: deck, at: start, show: show, onReview: { review in
+            guard session.identity == sourceID else { return }
+            document.deck.classroomReview = review
+        }) {
+            linkedError = show == nil ? "请先将至少一页设为正片。" : "所选放映方案里没有可放映的页面。"
+        }
+    }
+
+    private func useStyleBrush() {
+        guard let object = formattingObject else { return }
+        let ranges = selectedTextRanges.filter { !$0.isEmpty && $0.upperBound <= object.text.utf16.count }
+        if let paint = styleBrush {
+            formatSelectedText { target in
+                target.formatCharacters(in: ranges) { run in
+                    run.size = paint.size
+                    run.bold = paint.bold
+                    run.color = paint.color
+                    run.fontName = paint.fontName
+                    run.usesSystemFont = paint.usesSystemFont
+                    run.baseline = paint.baseline
+                    run.characterStyle = paint.characterStyle
+                }
+            }
+            styleBrush = nil
+        } else {
+            var copied = object.formattingStyles(in: ranges).first ?? object.baseTextStyle
+            copied.size = copied.size ?? object.fontSize
+            if copied.usesSystemFont != true { copied.fontName = copied.fontName ?? object.textLayout?.fontName }
+            styleBrush = copied
+        }
+    }
+
+    private func snap(for id: UUID, delta: CGSize) -> CanvasSnap {
+        guard snapEnabled, !NSEvent.modifierFlags.contains(.option),
+              let object = slide.objects.first(where: { $0.id == id }) else { return .init(delta: delta) }
+        let moving = selectedObjects.contains(id) ? selectedObjects : [id]
+        let frame = slide.objects.filter { moving.contains($0.id) }.reduce(CGRect.null) { $0.union($1.frame) }
+        let anchors = slide.objects.filter { !moving.contains($0.id) && !hiddenObjects.contains($0.id) && $0.isCourseFooter != true }.map(\.frame)
+        return CanvasSnap.move(frame.isNull ? object.frame : frame, by: delta,
+                               anchors: anchors + [CGRect(origin: .zero, size: deck.pageCanvas.size)], tolerance: 6)
+    }
+
+    @ViewBuilder
+    private func overflowIndicator(_ object: SlideObject) -> some View {
+        if object.kind == .text && SlideText.isClipped(object) {
+            Menu {
+                Button("增高文本框") { repairOverflow(object.id, action: .grow) }
+                Button("缩小字号") { repairOverflow(object.id, action: .shrink) }
+                Button("拆到续页") { repairOverflow(object.id, action: .split) }
+            } label: {
+                Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange).padding(3)
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .help("文本溢出。选择处理方式。")
+            .accessibilityLabel("处理文本溢出")
+        }
+    }
+
+    private func repairOverflow(_ id: UUID, action: ClassroomOverflowAction) {
+        guard let position = slide.objects.firstIndex(where: { $0.id == id }) else { return }
+        var revised = deck
+        let object = slide.objects[position]
+        switch action {
+        case .grow:
+            var changed = object
+            let limit = max(changed.height, deck.pageCanvas.height - changed.y - 8)
+            while SlideText.isClipped(changed) && changed.height < limit { changed.height = min(limit, changed.height + 14) }
+            revised.slides[index].objects[position] = changed
+        case .shrink:
+            var changed = object
+            while SlideText.isClipped(changed) && changed.fontSize > 8 {
+                let next = max(8, changed.fontSize - 1)
+                changed.formatCharacters(in: []) { $0.size = max(8, min(next, $0.size ?? next)) }
+            }
+            revised.slides[index].objects[position] = changed
+        case .split:
+            guard let divided = SlideText.splitOverflow(object, continuationHeight: deck.pageCanvas.height - 48) else {
+                linkedError = "当前文本框无法容纳完整文字。请先加高文本框或缩小字号。"
+                return
+            }
+            revised.slides[index].objects[position] = divided.first
+            var continuation = slide
+            continuation.id = UUID()
+            continuation.objects = divided.continuations
+            continuation.speakerNotes = ""
+            continuation.bookmarked = nil
+            continuation.importReport = nil
+            continuation.originalPDFPage = nil
+            var pages: [Slide] = []
+            for object in divided.continuations {
+                var page = continuation
+                page.id = UUID()
+                page.objects = [object]
+                pages.append(page)
+            }
+            revised.slides.insert(contentsOf: pages, at: index + 1)
+        }
+        document.deck = revised
+    }
+
+    private func moveLayer(_ id: UUID, onto target: UUID) -> Bool {
+        guard id != target, let source = slide.objects.firstIndex(where: { $0.id == id && $0.isCourseFooter != true }),
+              let destination = slide.objects.firstIndex(where: { $0.id == target && $0.isCourseFooter != true }) else { return false }
+        document.deck.slides[index].objects.move(fromOffsets: IndexSet(integer: source),
+                                                   toOffset: destination > source ? destination + 1 : destination)
+        return true
+    }
+
+    private func restorePDFPage() {
+        guard let original = slide.originalPDFPage else { return }
+        var changed = deck
+        changed.slides[index].background = original.background
+        changed.slides[index].objects = original.objects
+        changed.slides[index].importReport?.repair = original.previousRepair
+        changed.slides[index].originalPDFPage = nil
+        do { document.deck = try changed.validated() }
+        catch { linkedError = error.localizedDescription }
+    }
+
+    private var chapterStarts: [Slide] {
+        deck.slides.enumerated().compactMap { index, page in
+            guard !page.section.isEmpty, index == 0 || deck.slides[index - 1].section != page.section else { return nil }
+            return page
+        }
+    }
+
+    private func movePages(_ ids: Set<UUID>, to chapter: UUID) {
+        guard !ids.contains(chapter), let range = sectionRange(chapter) else { return }
+        var changed = deck
+        let section = changed.slides[range.lowerBound].section
+        let anchor = changed.slides[range].last(where: { !ids.contains($0.id) })?.id ?? chapter
+        var moved = changed.slides.filter { ids.contains($0.id) }
+        for index in moved.indices { moved[index].section = section }
+        changed.slides.removeAll { ids.contains($0.id) }
+        guard let destination = changed.slides.firstIndex(where: { $0.id == anchor }) else { return }
+        changed.slides.insert(contentsOf: moved, at: destination + 1)
+        document.deck = changed
+        search = ""
+        slideFilter = .all
+        selectPages(moved.map(\.id))
+    }
+
+    private var canReorderRows: Bool { search.isEmpty && slideFilter == .all && collapsedSections.isEmpty }
+
+    private func startPageDrag(_ id: UUID) -> NSItemProvider {
+        draggingPage = id
+        let provider = NSItemProvider()
+        provider.registerDataRepresentation(forTypeIdentifier: classroomSlideDragType, visibility: .ownProcess) { complete in
+            complete(Data(id.uuidString.utf8), nil)
+            return nil
+        }
+        return provider
+    }
+
+    private func dropPage(before destination: UUID) -> Bool {
+        defer { stopPageDrag() }
+        guard let source = draggingPage, source != destination,
+              let first = deck.slides.firstIndex(where: { $0.id == source }),
+              let target = deck.slides.firstIndex(where: { $0.id == destination }) else { return false }
+        reorder(from: IndexSet(integer: first), to: target)
+        return true
+    }
+
+    private func stopPageDrag() {
+        edgeScroll?.cancel()
+        edgeScroll = nil
+        draggingPage = nil
+        pageDropTarget = nil
+    }
+
+    private func scrollEdge(_ side: VerticalEdge, using proxy: ScrollViewProxy) -> some View {
+        Rectangle().fill(Color.accentColor.opacity(0.1)).frame(height: 18).contentShape(Rectangle())
+            .onDrop(of: [classroomSlideDragType], delegate: ClassroomDropHandler(entered: { near in
+                edgeScroll?.cancel()
+                edgeScroll = nil
+                guard near, let draggingPage else { return }
+                let direction = side == .top ? -1 : 1
+                let pages = deck.slides.map(\.id)
+                guard var cursor = pages.firstIndex(of: pageDropTarget ?? draggingPage) else { return }
+                edgeScroll = Task { @MainActor in
+                    while !Task.isCancelled {
+                        let next = cursor + direction
+                        guard pages.indices.contains(next) else { return }
+                        cursor = next
+                        withAnimation(.linear(duration: 0.13)) { proxy.scrollTo(pages[cursor], anchor: side == .top ? .top : .bottom) }
+                        try? await Task.sleep(for: .milliseconds(155))
+                    }
+                }
+            }, dropped: { stopPageDrag(); return false }))
+            .accessibilityHidden(true)
+    }
+
+    private func exportTarget(format: UTType, name: String) -> URL? {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [format]
+        panel.nameFieldStringValue = name
+        panel.directoryURL = session.currentDocumentURL?.deletingLastPathComponent()
+        return panel.runModal() == .OK ? panel.url : nil
+    }
+
+    private func exportSelected(_ ids: Set<UUID>, format: ClassroomExportFormat) {
+        let copy = deck.selectingPages(ids)
+        guard !copy.slides.isEmpty, let url = exportTarget(format: format.contentType, name: session.name + "-选中页") else { return }
+        writeExport(at: url) {
+            switch format {
+            case .powerPoint:
+                try PowerPoint.write(copy, to: url)
+                return ClassroomExport.checkPowerPoint(copy, at: url)
+            case .projection:
+                try SlideDrawing.pdf(copy, includeBackups: true, to: url)
+                return []
+            }
+        }
+    }
+
+    private func exportCompatibility(fonts: [String], replacement: String?, flattened: Set<UUID>) {
+        guard let url = exportTarget(format: .slidePowerPoint, name: session.name + "-教室兼容副本") else { return }
+        let input = deck
+        writeExport(at: url) {
+            let copy = try ClassroomExport.compatibilityCopy(input, sources: fonts, replacement: replacement, flatten: flattened)
+            try PowerPoint.write(copy, to: url)
+            return ClassroomExport.checkPowerPoint(copy, at: url)
+        }
+    }
+
+    private func saveHandout(_ data: Data, title: String) {
+        guard let url = exportTarget(format: .pdf, name: session.name + "-" + title) else { return }
+        writeExport(at: url) {
+            try data.write(to: url, options: .atomic)
+            return []
+        }
+    }
+
+    private func writeExport(at url: URL, _ operation: @escaping () throws -> [String]) {
+        Task { @MainActor in
+            do {
+                let report = try await Task.detached(priority: .userInitiated) {
+                    let scoped = url.startAccessingSecurityScopedResource()
+                    defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+                    return try operation()
+                }.value
+                exportReceipt = .init(url: url, report: report)
+            } catch {
+                exportReceipt = .init(url: url, success: false, report: [error.localizedDescription])
+            }
+        }
+    }
+
 }
 
 private struct ReferenceFile: Identifiable {
@@ -1932,6 +2374,7 @@ private struct ObjectHitArea: View {
     let canvas: SlideCanvas
     let select: () -> Void
     let edit: () -> Void
+    let guide: (CGSize) -> Void
     let move: (CGSize) -> Void
     @GestureState private var translation: CGSize? = nil
 
@@ -1962,6 +2405,7 @@ private struct ObjectHitArea: View {
             .onTapGesture(perform: select)
             .gesture(DragGesture(minimumDistance: 4, coordinateSpace: .named("slideCanvas"))
                 .updating($translation) { drag, state, _ in state = drag.translation }
+                .onChanged { guide($0.translation) }
                 .onEnded { drag in move(drag.translation) })
             .offset(translation ?? .zero)
             .accessibilityLabel(object.label)

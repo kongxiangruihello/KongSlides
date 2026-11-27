@@ -188,6 +188,9 @@ struct SlideObject: Codable, Identifiable, Equatable {
     var decorationSource: DecorationSource?
     var locked: Bool?
     var groupID: UUID?
+    var objectName: String?
+    var teacherOnly: Bool?
+    var isCourseFooter: Bool?
 
     var isLocked: Bool { locked == true }
 
@@ -226,6 +229,7 @@ struct SlideObject: Codable, Identifiable, Equatable {
     }
 
     var label: String {
+        if let objectName, !objectName.isEmpty { return objectName }
         switch kind {
         case .text: return text.split(separator: "\n").first.map { String($0.prefix(26)) } ?? "文本框"
         case .image: return "图片"
@@ -270,11 +274,15 @@ struct Slide: Codable, Identifiable, Equatable {
     var objects: [SlideObject] = []
     var importReport: SlideImportReport?
     var hiddenInShow: Bool?
+    var teacherOnly: Bool?
+    var originalPDFPage: RestorablePDFPage?
+    var courseFooterHidden: Bool?
 
     var isBackup: Bool { hiddenInShow == true }
 
     var title: String {
-        let title = objects.lazy.filter { $0.kind == .text && $0.decorationSource == nil }.map(\.label).first
+        let title = objects.lazy.filter { $0.kind == .text && $0.decorationSource == nil && $0.isCourseFooter != true }
+            .compactMap { $0.text.split(separator: "\n").first.map { String($0.prefix(26)) } }.first
         return title ?? "空白页"
     }
 
@@ -300,6 +308,9 @@ struct Deck: Codable, Equatable {
     var images: [UUID: Data] = [:]
     var importedTitle: String?
     var canvas: SlideCanvas?
+    var courseFooter: CourseFooter?
+    var classroomShows: [ClassroomShow]?
+    var classroomReview: ClassroomReview?
 
     func editorPage(after index: Int, direction: Int, matching: Set<UUID>? = nil) -> UUID? {
         guard slides.indices.contains(index), direction == 1 || direction == -1 else { return nil }
@@ -347,7 +358,7 @@ struct Deck: Codable, Equatable {
             guard Set(slide.objects.map(\.id)).count == slide.objects.count else {
                 throw CocoaError(.fileReadCorruptFile)
             }
-            for object in slide.objects {
+            for object in slide.objects + (slide.originalPDFPage?.objects ?? []) {
                 guard abs(object.x) <= 10_000, abs(object.y) <= 10_000,
                       (1...10_000).contains(object.width), (1...10_000).contains(object.height),
                       (8...200).contains(object.fontSize), object.textLayout?.isValid != false,

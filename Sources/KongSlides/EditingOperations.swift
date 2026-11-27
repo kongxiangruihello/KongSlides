@@ -64,7 +64,7 @@ struct SlideClipboard: Codable {
     init(slides: [Slide], images: [UUID: Data], canvas: SlideCanvas? = nil) {
         self.slides = slides
         self.canvas = canvas
-        let assetIDs = Set(slides.flatMap { $0.objects.compactMap(\.imageID) })
+        let assetIDs = Set(slides.flatMap { ($0.objects + ($0.originalPDFPage?.objects ?? [])).compactMap(\.imageID) })
         self.images = images.filter { assetIDs.contains($0.key) }
     }
 
@@ -107,6 +107,14 @@ struct SlideClipboard: Codable {
                 }
                 if let asset = object.imageID { result.imageID = assetMap[asset] ?? asset }
                 return result
+            }
+            if let original = slide.originalPDFPage {
+                let objects = original.objects.map { object in
+                    var result = source.fitting(object, into: target)
+                    if let asset = result.imageID { result.imageID = assetMap[asset] ?? asset }
+                    return result
+                }
+                copy.originalPDFPage = .init(background: original.background, objects: objects, previousRepair: nil)
             }
             return copy
         }

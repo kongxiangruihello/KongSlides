@@ -23,8 +23,16 @@ enum TeachingPDF {
     private static let bodyColor = NSColor(srgbRed: 0.14, green: 0.17, blue: 0.22, alpha: 1)
     private static let ruleColor = NSColor(srgbRed: 0.79, green: 0.81, blue: 0.85, alpha: 1)
 
-    static func write(_ deck: Deck, format: Format, includeBackups: Bool = false, to url: URL) throws {
-        let pages = try deck.pagesForPDF(includeBackups: format == .teacher || includeBackups)
+    static func write(_ deck: Deck, format: Format, includeBackups: Bool = false,
+                      sourcePageNumbers: [UUID: Int] = [:], includeTeacherContent: Bool = false, to url: URL) throws {
+        let numbers = sourcePageNumbers.isEmpty
+            ? Dictionary(uniqueKeysWithValues: deck.slides.enumerated().map { ($0.element.id, $0.offset + 1) })
+            : sourcePageNumbers
+        let input = format == .teacher ? deck
+            : deck.studentCopy(hideTeacherContent: !includeTeacherContent, includeBackups: includeBackups)
+        let pages = try input.pagesForPDF(includeBackups: format == .teacher || includeBackups).map {
+            (offset: (numbers[$0.element.id] ?? $0.offset + 1) - 1, element: $0.element)
+        }
         guard let output = CFDataCreateMutable(nil, 0),
               let consumer = CGDataConsumer(data: output) else { throw CocoaError(.fileWriteUnknown) }
         var page = paper

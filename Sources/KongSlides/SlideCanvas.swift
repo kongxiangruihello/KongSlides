@@ -66,6 +66,11 @@ extension Deck {
         copy.canvas = target
         for index in copy.slides.indices {
             copy.slides[index].objects = copy.slides[index].objects.map { current.fitting($0, into: target) }
+            if let original = copy.slides[index].originalPDFPage {
+                copy.slides[index].originalPDFPage = .init(
+                    background: original.background, objects: original.objects.map { current.fitting($0, into: target) },
+                    previousRepair: original.previousRepair)
+            }
         }
         return copy
     }

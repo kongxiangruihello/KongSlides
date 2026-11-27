@@ -31,6 +31,9 @@ final class PresentationController: NSObject, ObservableObject, NSWindowDelegate
     @Published private(set) var dualScreen = false
     @Published var showSingleScreenControls = true
     @Published var blackScreen = false
+    @Published var whiteScreen = false
+    @Published var noteIndex = 0
+    @Published var discussionEnd: Date?
     @Published var drawingEnabled = false
     @Published var ink: [[CGPoint]] = []
 
@@ -44,15 +47,36 @@ final class PresentationController: NSObject, ObservableObject, NSWindowDelegate
     private var rehearsalPages: [Int] = []
     private var rehearsal: [ChapterRehearsal] = []
     private var chapterStartedAt = 0.0
+    private var customPositions: [Int]?
+    private var reviewCompletion: ((ClassroomReview) -> Void)?
+    private var visited: [Int] = []
+
+    var notes: [String] {
+        let text = deck.slides[index].speakerNotes
+        return text.components(separatedBy: .newlines).map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+    }
+
+    func stepNote(_ change: Int) { noteIndex = min(max(0, notes.count - 1), max(0, noteIndex + change)) }
+    func toggleBlack() { blackScreen.toggle(); if blackScreen { whiteScreen = false } }
+    func toggleWhite() { whiteScreen.toggle(); if whiteScreen { blackScreen = false } }
+    var projectionBlanked: Bool { blackScreen || whiteScreen }
 
     @discardableResult
-    func start(deck: Deck, at index: Int, onRehearsalFinished: (([ChapterRehearsal]) -> Void)? = nil) -> Bool {
-        guard let first = deck.firstPresentationIndex(at: index) else { return false }
+    func start(deck: Deck, at index: Int, show: ClassroomShow? = nil,
+               onReview: ((ClassroomReview) -> Void)? = nil,
+               onRehearsalFinished: (([ChapterRehearsal]) -> Void)? = nil) -> Bool {
+        let route = show.map { $0.positions(in: deck) }
+        let first = route.flatMap(\.first) ?? (show == nil ? deck.firstPresentationIndex(at: index) : nil)
+        guard let first else { return false }
         stop()
         self.deck = deck
         self.index = first
         rehearsalCompletion = onRehearsalFinished
-        if onRehearsalFinished != nil {
+        reviewCompletion = onReview
+        customPositions = route
+        visited = [first]
+        if onRehearsalFinished != nil || onReview != nil {
             for (position, page) in deck.slides.enumerated() {
                 if position == 0 || deck.slides[position - 1].section != page.section {
                     rehearsal.append(.init(id: page.id, title: page.section.isEmpty ? "未命名章节" : page.section,
@@ -81,7 +105,10 @@ final class PresentationController: NSObject, ObservableObject, NSWindowDelegate
             case 115: self.goToBoundary(last: false)
             case 119: self.goToBoundary(last: true)
             case 15: self.returnToRegularSlide()
-            case 11: self.blackScreen.toggle()
+            case 11: self.toggleBlack()
+            case 13: self.toggleWhite()
+            case 33: if self.dualScreen, window === self.console { self.stepNote(-1) }
+            case 30: if self.dualScreen, window === self.console { self.stepNote(1) }
             case 35: self.drawingEnabled.toggle()
             case 8: if !self.dualScreen { self.showSingleScreenControls.toggle() }
             default: return event
@@ -105,7 +132,13 @@ final class PresentationController: NSObject, ObservableObject, NSWindowDelegate
     var backupIndices: [Int] { deck.slides.indices.filter { deck.slides[$0].isBackup } }
 
     func sequentialIndex(_ step: Int) -> Int? {
-        deck.presentationIndex(after: regularReturnIndex ?? index, step: step)
+        let current = regularReturnIndex ?? index
+        if let customPositions {
+            guard let position = customPositions.firstIndex(of: current),
+                  customPositions.indices.contains(position + step) else { return nil }
+            return customPositions[position + step]
+        }
+        return deck.presentationIndex(after: current, step: step)
     }
 
     func step(_ delta: Int) {
@@ -114,7 +147,7 @@ final class PresentationController: NSObject, ObservableObject, NSWindowDelegate
 
     func go(to position: Int) {
         guard deck.slides.indices.contains(position) else { return }
-        if deck.slides[position].isBackup {
+        if customPositions.map({ !$0.contains(position) }) ?? deck.slides[position].isBackup {
             if regularReturnIndex == nil { regularReturnIndex = index }
         } else {
             regularReturnIndex = nil
@@ -122,6 +155,8 @@ final class PresentationController: NSObject, ObservableObject, NSWindowDelegate
         if index != position {
             recordRehearsalElapsed()
             ink.removeAll()
+            noteIndex = 0
+            if !visited.contains(position) { visited.append(position) }
         }
         index = position
     }
@@ -131,6 +166,10 @@ final class PresentationController: NSObject, ObservableObject, NSWindowDelegate
     }
 
     private func goToBoundary(last: Bool) {
+        if let customPositions {
+            if let target = last ? customPositions.last : customPositions.first { go(to: target) }
+            return
+        }
         let end = last ? deck.slides.count - 1 : 0
         if let target = deck.firstPresentationIndex(at: end) { go(to: target) }
     }
@@ -154,7 +193,18 @@ final class PresentationController: NSObject, ObservableObject, NSWindowDelegate
         recordRehearsalElapsed()
         let completion = rehearsalCompletion
         let results = rehearsal
+        let onReview = reviewCompletion
+        let route = customPositions ?? deck.slides.indices.filter { !deck.slides[$0].isBackup }
+        let summary = active && onReview != nil ? ClassroomReview(
+            date: started, lastPage: deck.slides[index].id,
+            visited: visited.map { deck.slides[$0].id },
+            skipped: route.filter { !visited.contains($0) }.map { deck.slides[$0].id },
+            chapters: results.map { .init(id: $0.id, title: $0.title, plannedMinutes: $0.plannedMinutes, seconds: $0.seconds) }
+        ) : nil
         rehearsalCompletion = nil
+        reviewCompletion = nil
+        customPositions = nil
+        visited = []
         rehearsalPages.removeAll()
         rehearsal.removeAll()
         active = false
@@ -167,6 +217,9 @@ final class PresentationController: NSObject, ObservableObject, NSWindowDelegate
         dualScreen = false
         regularReturnIndex = nil
         blackScreen = false
+        whiteScreen = false
+        discussionEnd = nil
+        noteIndex = 0
         drawingEnabled = false
         ink.removeAll()
         for window in windows {
@@ -175,6 +228,7 @@ final class PresentationController: NSObject, ObservableObject, NSWindowDelegate
             window.close()
         }
         completion?(results)
+        if let summary { onReview?(summary) }
     }
 
     func windowWillClose(_ notification: Notification) {
@@ -259,15 +313,15 @@ private struct ProjectionView: View {
 
     var body: some View {
         ZStack {
-            Color.black
-            if !session.blackScreen {
+            session.whiteScreen ? Color.white : Color.black
+            if !session.projectionBlanked {
                 SlideSurface(slide: session.deck.slides[session.index], images: session.deck.images, canvas: session.deck.pageCanvas)
                     .overlay { PresentationInk(session: session, interactive: !session.dualScreen) }
             }
         }
         .ignoresSafeArea()
         .overlay(alignment: .bottom) {
-            if !session.dualScreen && session.showSingleScreenControls && !session.blackScreen {
+            if !session.dualScreen && session.showSingleScreenControls && !session.projectionBlanked {
                 HStack(spacing: 14) {
                     Button("上一页") { session.step(-1) }.disabled(session.sequentialIndex(-1) == nil)
                     Text("\(session.index + 1) / \(session.deck.slides.count)").monospacedDigit()
@@ -287,6 +341,8 @@ private struct ProjectionView: View {
 private struct PresenterView: View {
     @ObservedObject var session: PresentationController
     @State private var jump = ""
+    @State private var showSearch = false
+    @State private var discussionMinutes = 5
 
     private var slide: Slide { session.deck.slides[session.index] }
 
@@ -303,6 +359,20 @@ private struct PresenterView: View {
                     Text(String(format: "%02d:%02d:%02d", elapsed / 3600, (elapsed / 60) % 60, elapsed % 60))
                         .monospacedDigit().font(.title2)
                 }
+                Menu("讨论计时") {
+                    Stepper("\(discussionMinutes) 分钟", value: $discussionMinutes, in: 1...90)
+                    Button("开始 \(discussionMinutes) 分钟") {
+                        session.discussionEnd = Date().addingTimeInterval(Double(discussionMinutes * 60))
+                    }
+                    Button("停止计时") { session.discussionEnd = nil }.disabled(session.discussionEnd == nil)
+                }
+                if let end = session.discussionEnd {
+                    TimelineView(.periodic(from: Date(), by: 1)) { time in
+                        let seconds = max(0, Int(ceil(end.timeIntervalSince(time.date))))
+                        Text(seconds == 0 ? "讨论结束" : String(format: "%02d:%02d", seconds / 60, seconds % 60))
+                            .monospacedDigit()
+                    }
+                }
                 ProjectionTools(session: session)
                 Button("交换屏幕", action: session.swapScreens)
                 Button("结束放映", action: session.stop)
@@ -318,6 +388,8 @@ private struct PresenterView: View {
                         Spacer()
                         TextField("页码", text: $jump).frame(width: 65).onSubmit(go)
                         Button("跳页", action: go)
+                        Button("搜索跳页…") { showSearch = true }
+                            .popover(isPresented: $showSearch) { PresenterSearchView(session: session) }
                         BackupPageMenu(session: session)
                     }
                 }
@@ -332,15 +404,29 @@ private struct PresenterView: View {
                 .frame(maxWidth: 280)
             }
             Divider()
-            Text("逐字讲稿").font(.headline)
-            ScrollView {
-                if let cue = slide.teachingCue {
-                    Text(cue.rawValue).font(.headline).foregroundStyle(Color.accentColor)
+            HStack {
+                Text("逐字讲稿").font(.headline)
+                Spacer()
+                Button("上一段 [") { session.stepNote(-1) }.disabled(session.noteIndex == 0)
+                Button("下一段 ]") { session.stepNote(1) }.disabled(session.noteIndex + 1 >= session.notes.count)
+            }
+            ScrollViewReader { scroll in
+                ScrollView {
+                    if let cue = slide.teachingCue {
+                        Text(cue.rawValue).font(.headline).foregroundStyle(Color.accentColor)
+                    }
+                    if session.notes.isEmpty { Text("本页暂无讲稿").foregroundStyle(.secondary) }
+                    ForEach(session.notes.indices, id: \.self) { index in
+                        Text(session.notes[index]).font(.system(size: 21))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(5)
+                            .background(index == session.noteIndex ? Color.accentColor.opacity(0.18) : .clear,
+                                        in: .rect(cornerRadius: 5))
+                            .id(index)
+                    }
                 }
-                Text(slide.speakerNotes.isEmpty ? "本页暂无讲稿" : slide.speakerNotes)
-                    .font(.system(size: 21))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .id(slide.id)
+                .onChange(of: session.noteIndex) { scroll.scrollTo(session.noteIndex, anchor: .center) }
+                .id(slide.id)
             }
         }
         .padding(20)
@@ -383,7 +469,8 @@ private struct ProjectionTools: View {
 
     var body: some View {
         Menu("放映工具") {
-            Button(session.blackScreen ? "恢复投影（B）" : "黑屏（B）") { session.blackScreen.toggle() }
+            Button(session.blackScreen ? "恢复投影（B）" : "黑屏（B）", action: session.toggleBlack)
+            Button(session.whiteScreen ? "恢复投影（W）" : "白屏（W）", action: session.toggleWhite)
             Button(session.drawingEnabled ? "停用临时画笔（P）" : "启用临时画笔（P）") {
                 session.drawingEnabled.toggle()
             }
@@ -409,7 +496,7 @@ private struct PresentationInk: View {
         }
         .clipped()
         .overlay {
-            if interactive && session.drawingEnabled && !session.blackScreen {
+            if interactive && session.drawingEnabled && !session.projectionBlanked {
                 GeometryReader { geometry in
                     Rectangle().fill(.clear).contentShape(Rectangle())
                         .gesture(DragGesture(minimumDistance: 0)
@@ -431,6 +518,36 @@ private struct PresentationInk: View {
             }
         }
         .onChange(of: drawing) { if !drawing { lastStroke = nil } }
-        .allowsHitTesting(interactive && session.drawingEnabled && !session.blackScreen)
+        .allowsHitTesting(interactive && session.drawingEnabled && !session.projectionBlanked)
+    }
+}
+
+private struct PresenterSearchView: View {
+    @ObservedObject var session: PresentationController
+    @Environment(\.dismiss) private var dismiss
+    @State private var query = ""
+    @State private var active: Int?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            TextField("章节名称、标题或关键词", text: $query)
+            HStack {
+                List(filtered, id: \.self, selection: $active) { index in
+                    let page = session.deck.slides[index]
+                    Text("\(index + 1)  \(page.section)  \(page.title)").tag(index)
+                }
+                if let active {
+                    SlideSurface(slide: session.deck.slides[active], images: session.deck.images, canvas: session.deck.pageCanvas)
+                }
+            }
+            Button("将预览页切到投影") {
+                if let active { session.go(to: active); dismiss() }
+            }.disabled(active == nil)
+        }.padding(15).frame(width: 590, height: 330)
+         .onChange(of: query) { active = nil }
+    }
+
+    private var filtered: [Int] {
+        session.deck.slides.indices.filter { query.isEmpty || SlideSearchHit.first(on: session.deck.slides[$0], query: query) != nil }
     }
 }
