@@ -279,9 +279,13 @@ struct EditorView: View {
             .fixedSize()
             Button { addObject(SlideObject()) } label: { Label("文字", systemImage: "textformat") }
             Button(action: addImage) { Label("图片", systemImage: "photo") }
-            Button {
-                addObject(SlideObject(kind: .rectangle, x: 110, y: 170,
-                                      width: 220, height: 100, color: Palette.indigo))
+            Menu {
+                Button("矩形") {
+                    addObject(SlideObject(kind: .rectangle, x: 110, y: 170,
+                                          width: 220, height: 100, color: Palette.indigo))
+                }
+                Button("直线") { addConnector(arrow: .none) }
+                Button("箭头") { addConnector(arrow: .triangle) }
             } label: { Label("形状", systemImage: "rectangle") }
             Button {
                 let table = SlideTable(columns: [1, 1, 1], rows: [1, 1, 1], cells: (0..<9).map {
@@ -334,7 +338,13 @@ struct EditorView: View {
             HStack {
                 Text("幻灯片").font(.headline)
                 Spacer()
-                Text("\(deck.slides.count) 页").monospacedDigit().foregroundStyle(.secondary)
+                Text("\(index + 1) / \(deck.slides.count)").monospacedDigit().foregroundStyle(.secondary)
+                Button { stepEditorPage(-1) } label: { Image(systemName: "chevron.up") }
+                    .buttonStyle(.borderless).disabled(editorPage(-1) == nil)
+                    .help("上一页（↑ 或 Page Up）").accessibilityLabel("上一页")
+                Button { stepEditorPage(1) } label: { Image(systemName: "chevron.down") }
+                    .buttonStyle(.borderless).disabled(editorPage(1) == nil)
+                    .help("下一页（↓ 或 Page Down）").accessibilityLabel("下一页")
             }
             .padding(.horizontal, 12)
             TextField("搜索标题、正文或讲稿", text: $search)
@@ -361,11 +371,15 @@ struct EditorView: View {
                 .listStyle(.sidebar)
                 .onChange(of: slide.id) {
                     if let range = sectionRange(slide.id) {
-                        if deck.slides[range.lowerBound].id != slide.id {
-                            collapsedSections.remove(deck.slides[range.lowerBound].id)
-                        }
+                        let header = deck.slides[range.lowerBound].id
+                        if header != slide.id, collapsedSections.remove(header) != nil { return }
                     }
                     scroll.scrollTo(slide.id, anchor: .center)
+                }
+                .onChange(of: collapsedSections) {
+                    if visibleSlides.contains(where: { $0.id == slide.id }) {
+                        scroll.scrollTo(slide.id, anchor: .center)
+                    }
                 }
             }
         }
@@ -413,22 +427,37 @@ struct EditorView: View {
                     Text(row.section).font(.caption.weight(.semibold)).lineLimit(1).foregroundStyle(.secondary)
                 }
             }
-            SlideSurface(slide: row, images: deck.images, canvas: deck.pageCanvas)
-                .clipShape(.rect(cornerRadius: 4))
-                .overlay(RoundedRectangle(cornerRadius: 4).strokeBorder(.secondary.opacity(0.24)))
-                .accessibilityHidden(true)
-            HStack(spacing: 7) {
-                Text(String(format: "%02d", position + 1)).monospacedDigit().foregroundStyle(.secondary)
-                Text(row.title).lineLimit(1)
-                if row.isBackup {
-                    Image(systemName: "eye.slash").foregroundStyle(.secondary)
-                        .accessibilityLabel("备用页").help("备用页，顺序放映时跳过")
+            VStack(alignment: .leading, spacing: 5) {
+                SlideSurface(slide: row, images: deck.images, canvas: deck.pageCanvas)
+                    .clipShape(.rect(cornerRadius: 4))
+                    .overlay(RoundedRectangle(cornerRadius: 4).strokeBorder(
+                        row.id == slide.id ? Color.accentColor : .secondary.opacity(0.24),
+                        lineWidth: row.id == slide.id ? 2 : 1))
+                    .accessibilityHidden(true)
+                HStack(spacing: 7) {
+                    Text(String(format: "%02d", position + 1)).monospacedDigit().foregroundStyle(.secondary)
+                    Text(row.title).lineLimit(1)
+                    if row.isBackup {
+                        Image(systemName: "eye.slash").foregroundStyle(.secondary)
+                            .accessibilityLabel("备用页").help("备用页，顺序放映时跳过")
+                    }
+                    Spacer(minLength: 0)
                 }
+                .font(.caption)
             }
-            .font(.caption)
+            .padding(.vertical, 6)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+            .simultaneousGesture(TapGesture().onEnded {
+                pageCommands = true
+                if NSEvent.modifierFlags.intersection([.command, .shift]).isEmpty {
+                    selectPages([row.id])
+                }
+            })
+            .accessibilityElement(children: .combine)
+            .accessibilityAddTraits(row.id == slide.id ? .isSelected : [])
         }
-        .padding(.vertical, 6)
-        .simultaneousGesture(TapGesture().onEnded { pageCommands = true })
+        .frame(maxWidth: .infinity, alignment: .leading)
         .contextMenu {
             let pages = selectedPages.contains(row.id) ? selectedPages : [row.id]
             if pages.count > 1 {
@@ -587,7 +616,9 @@ struct EditorView: View {
                         Text("\(table.rows.count) 行 × \(table.columns.count) 列").font(.caption)
                         Button("编辑单元格…") { editTable = object }
                     } else {
-                        colorMenu(object.kind == .text ? "文字颜色" : "填充颜色",
+                        if object.kind == .connector { connectorControls(object) }
+                        let colorTitle = object.kind == .text ? "文字颜色" : object.kind == .connector ? "线条颜色" : "填充颜色"
+                        colorMenu(colorTitle,
                                   selection: objectBinding(object.id, \.color, fallback: Palette.ink),
                                   colors: [("墨黑", Palette.ink), ("靛蓝", Palette.indigo), ("砖红", "A34E42"),
                                            ("墨绿", "286B61"), ("纯白", "FFFFFF")])
@@ -617,7 +648,8 @@ struct EditorView: View {
                             objectID = object.id
                         } label: {
                             Label(object.label, systemImage: object.kind == .text ? "textformat" :
-                                    object.kind == .image ? "photo" : object.kind == .table ? "tablecells" : "rectangle")
+                                    object.kind == .image ? "photo" : object.kind == .table ? "tablecells" :
+                                    object.kind == .connector ? "arrow.up.right" : "rectangle")
                                 .lineLimit(1)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                         }
@@ -631,6 +663,76 @@ struct EditorView: View {
             .padding(14)
         }
         .background(Color(nsColor: .controlBackgroundColor))
+    }
+
+    private func addConnector(arrow: SlideConnector.Arrow) {
+        if let line = SlideConnector.object(from: CGPoint(x: 110, y: 175), to: CGPoint(x: 315, y: 175),
+                                            style: SlideConnector(endArrow: arrow), color: Palette.indigo) {
+            addObject(line)
+        }
+    }
+
+    private func connectorControls(_ object: SlideObject) -> some View {
+        let binding = objectBinding(object.id, \.connector, fallback: nil)
+        func field<Value>(_ path: WritableKeyPath<SlideConnector, Value>) -> Binding<Value> {
+            Binding(get: { (binding.wrappedValue ?? .init())[keyPath: path] },
+                    set: { value in
+                        guard var line = binding.wrappedValue else { return }
+                        line[keyPath: path] = value
+                        if line.isValid { binding.wrappedValue = line }
+                    })
+        }
+        return VStack(alignment: .leading, spacing: 6) {
+            Picker("起点箭头", selection: field(\.startArrow)) {
+                ForEach(SlideConnector.Arrow.allCases, id: \.self) { Text($0.title).tag($0) }
+            }
+            Picker("终点箭头", selection: field(\.endArrow)) {
+                ForEach(SlideConnector.Arrow.allCases, id: \.self) { Text($0.title).tag($0) }
+            }
+            Picker("线型", selection: field(\.dash)) {
+                ForEach(SlideConnector.Dash.allCases, id: \.self) { Text($0.title).tag($0) }
+            }
+            TextField("线宽", value: field(\.weight), format: .number.precision(.fractionLength(0...2)))
+                .help("线宽为 0.25 至 96 磅")
+            Grid(alignment: .leading, horizontalSpacing: 8) {
+                GridRow {
+                    connectorEndpoint("起点 X", object: object, start: true, horizontal: true)
+                    connectorEndpoint("起点 Y", object: object, start: true, horizontal: false)
+                }
+                GridRow {
+                    connectorEndpoint("终点 X", object: object, start: false, horizontal: true)
+                    connectorEndpoint("终点 Y", object: object, start: false, horizontal: false)
+                }
+            }
+        }
+    }
+
+    private func connectorEndpoint(_ title: String, object: SlideObject, start: Bool, horizontal: Bool) -> some View {
+        let field = Binding<Double>(
+            get: {
+                guard let current = slide.objects.first(where: { $0.id == object.id }),
+                      let line = current.connector else { return 0 }
+                let ends = line.endpoints(in: current.frame)
+                let point = start ? ends.start : ends.end
+                return horizontal ? point.x : point.y
+            },
+            set: { value in
+                guard let position = slide.objects.firstIndex(where: { $0.id == object.id }),
+                      let line = slide.objects[position].connector else { return }
+                let current = slide.objects[position]
+                var ends = line.endpoints(in: current.frame)
+                let axis: WritableKeyPath<CGPoint, CGFloat> = horizontal ? \.x : \.y
+                if start { ends.start[keyPath: axis] = value } else { ends.end[keyPath: axis] = value }
+                guard var updated = SlideConnector.object(from: ends.start, to: ends.end, style: line, color: current.color) else { return }
+                updated.id = current.id
+                document.deck.slides[index].objects[position] = updated
+            }
+        )
+        return VStack(alignment: .leading, spacing: 2) {
+            Text(title).font(.caption).foregroundStyle(.secondary)
+            TextField(title, value: field, format: .number.precision(.fractionLength(0...2)))
+                .labelsHidden().textFieldStyle(.roundedBorder)
+        }
     }
 
     private func pictureAppearanceControls(_ object: SlideObject) -> some View {
@@ -802,8 +904,24 @@ struct EditorView: View {
         }
     }
 
+    private func editorPage(_ direction: Int) -> UUID? {
+        deck.editorPage(after: index, direction: direction,
+                        matching: search.isEmpty ? nil : Set(filteredSlides.map(\.id)))
+    }
+
+    private func stepEditorPage(_ direction: Int) {
+        if let target = editorPage(direction) { selectPages([target]) }
+    }
+
     private func handleShortcut(_ event: NSEvent) -> Bool {
         let modifiers = event.modifierFlags.intersection([.command, .shift, .option, .control])
+        if modifiers.isEmpty {
+            switch event.keyCode {
+            case 116, 126: stepEditorPage(-1); return true
+            case 121, 125: stepEditorPage(1); return true
+            default: break
+            }
+        }
         let pages = selectedPages.isEmpty ? [slide.id] : selectedPages
         if modifiers.isEmpty, [51, 117].contains(event.keyCode) {
             if pageCommands { pendingDeletion = pages; return true }

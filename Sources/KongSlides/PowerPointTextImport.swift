@@ -57,9 +57,12 @@ struct PowerPointLayout {
     }
 
     func color(_ element: XMLElement) -> String? {
-        let fill = element.child("solidFill")
         if let explicit = element.rgbFill { return explicit }
-        guard let scheme = fill?.child("schemeClr"), let name = scheme.value("val") else { return nil }
+        return schemeColor(element.child("solidFill")?.child("schemeClr"))
+    }
+
+    func schemeColor(_ scheme: XMLElement?) -> String? {
+        guard let name = scheme?.value("val") else { return nil }
         let aliases = ["tx1": "dk1", "tx2": "dk2", "bg1": "lt1", "bg2": "lt2"]
         let key = layout?.child("clrMapOvr")?.child("overrideClrMapping")?.value(name) ??
             master?.child("clrMap")?.value(name) ?? aliases[name] ?? name

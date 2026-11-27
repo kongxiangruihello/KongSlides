@@ -98,6 +98,8 @@ enum PowerPoint {
                     shapes += textBox(object, id: id)
                 case .rectangle:
                     shapes += rectangle(object, id: id)
+                case .connector:
+                    if let line = object.connector { shapes += connectorXML(line, object: object, id: id) }
                 case .table:
                     if let table = object.table { shapes += tableXML(table, object: object, id: id) }
                 case .image:
@@ -184,6 +186,25 @@ enum PowerPoint {
         <p:sp><p:nvSpPr><p:cNvPr id="\(id)" name="Rectangle \(id)"/>
         <p:cNvSpPr/><p:nvPr/></p:nvSpPr>
         <p:spPr>\(geometry(object))\(fill(object.color))<a:ln><a:noFill/></a:ln></p:spPr></p:sp>
+        """
+    }
+
+    private static func connectorXML(_ line: SlideConnector, object: SlideObject, id: Int) -> String {
+        let (start, end) = line.endpoints(in: object.frame)
+        let startX = emu(start.x), startY = emu(start.y)
+        var endX = emu(end.x)
+        let endY = emu(end.y)
+        // Keep a nonzero extent when a valid, very short line rounds to a point in DrawingML.
+        if startX == endX && startY == endY { endX += 1 }
+        let flipH = startX > endX ? " flipH=\"1\"" : ""
+        let flipV = startY > endY ? " flipV=\"1\"" : ""
+        return """
+        <p:cxnSp><p:nvCxnSpPr><p:cNvPr id="\(id)" name="Connector \(id)"/><p:cNvCxnSpPr/><p:nvPr/></p:nvCxnSpPr>
+        <p:spPr><a:xfrm\(flipH)\(flipV)><a:off x="\(min(startX, endX))" y="\(min(startY, endY))"/>
+        <a:ext cx="\(abs(endX - startX))" cy="\(abs(endY - startY))"/></a:xfrm>
+        <a:prstGeom prst="straightConnector1"><a:avLst/></a:prstGeom>
+        <a:ln w="\(emu(line.weight))">\(fill(object.color))<a:prstDash val="\(line.dash.rawValue)"/>
+        <a:headEnd type="\(line.startArrow.rawValue)"/><a:tailEnd type="\(line.endArrow.rawValue)"/></a:ln></p:spPr></p:cxnSp>
         """
     }
 

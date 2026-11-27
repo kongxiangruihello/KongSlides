@@ -89,7 +89,7 @@ struct SlideImportReport: Codable, Equatable {
 }
 
 struct SlideObject: Codable, Identifiable, Equatable {
-    enum Kind: String, Codable { case text, image, rectangle, table }
+    enum Kind: String, Codable { case text, image, rectangle, table, connector }
 
     var id = UUID()
     var kind: Kind = .text
@@ -107,6 +107,7 @@ struct SlideObject: Codable, Identifiable, Equatable {
     var pictureCrop: PictureCrop?
     var pictureAppearance: PictureAppearance?
     var table: SlideTable?
+    var connector: SlideConnector?
 
     var frame: CGRect { CGRect(x: x, y: y, width: width, height: height) }
 
@@ -142,6 +143,7 @@ struct SlideObject: Codable, Identifiable, Equatable {
         case .image: return "图片"
         case .rectangle: return "矩形"
         case .table: return "表格"
+        case .connector: return "连接线"
         }
     }
 }
@@ -185,6 +187,17 @@ struct Deck: Codable, Equatable {
     var importedTitle: String?
     var canvas: SlideCanvas?
 
+    func editorPage(after index: Int, direction: Int, matching: Set<UUID>? = nil) -> UUID? {
+        guard slides.indices.contains(index), direction == 1 || direction == -1 else { return nil }
+        var next = index + direction
+        while slides.indices.contains(next) {
+            let id = slides[next].id
+            if matching?.contains(id) != false { return id }
+            next += direction
+        }
+        return nil
+    }
+
     func firstPresentationIndex(at startingIndex: Int) -> Int? {
         guard !slides.isEmpty else { return nil }
         let start = min(max(0, startingIndex), slides.count - 1)
@@ -226,7 +239,8 @@ struct Deck: Codable, Equatable {
                       (8...200).contains(object.fontSize), object.textLayout?.isValid != false, object.pictureCrop?.isValid != false, object.pictureAppearance?.isValid != false, object.validTextRuns else {
                     throw CocoaError(.fileReadCorruptFile)
                 }
-                guard object.kind != .table || object.table?.isValid == true else {
+                guard object.kind != .table || object.table?.isValid == true,
+                      object.kind != .connector || object.connector?.isValid == true else {
                     throw CocoaError(.fileReadCorruptFile)
                 }
                 if object.kind == .image {

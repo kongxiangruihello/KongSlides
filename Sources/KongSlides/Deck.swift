@@ -76,10 +76,61 @@ enum SlideDrawing {
                 context.restoreGState()
             case .text:
                 drawText(object, in: rect, context: context)
+            case .connector:
+                if let line = object.connector { drawConnector(line, object: object, canvasHeight: height, context: context) }
             case .table:
                 if let table = object.table { drawTable(table, in: rect, context: context) }
             }
         }
+    }
+
+    private static func drawConnector(_ line: SlideConnector, object: SlideObject, canvasHeight: CGFloat, context: CGContext) {
+        let ends = line.endpoints(in: object.frame)
+        let start = CGPoint(x: ends.start.x, y: canvasHeight - ends.start.y)
+        let end = CGPoint(x: ends.end.x, y: canvasHeight - ends.end.y)
+        let color = Palette.color(object.color).cgColor
+        context.saveGState()
+        context.setStrokeColor(color)
+        context.setFillColor(color)
+        context.setLineWidth(line.weight)
+        context.setLineDash(phase: 0, lengths: line.dash.pattern.map { $0 * line.weight })
+        context.move(to: start)
+        context.addLine(to: end)
+        context.strokePath()
+        context.setLineDash(phase: 0, lengths: [])
+        drawArrow(line.startArrow, tip: start, toward: end, weight: line.weight, context: context)
+        drawArrow(line.endArrow, tip: end, toward: start, weight: line.weight, context: context)
+        context.restoreGState()
+    }
+
+    private static func drawArrow(_ arrow: SlideConnector.Arrow, tip: CGPoint, toward: CGPoint,
+                                  weight: CGFloat, context: CGContext) {
+        let distance = hypot(toward.x - tip.x, toward.y - tip.y)
+        guard arrow != .none, distance > 0 else { return }
+        let length = min(distance / 2, max(6, weight * 3.5))
+        let radius = length * 0.46
+        context.saveGState()
+        context.translateBy(x: tip.x, y: tip.y)
+        context.rotate(by: atan2(toward.y - tip.y, toward.x - tip.x))
+        if arrow == .oval {
+            context.fillEllipse(in: CGRect(x: 0, y: -radius, width: length, height: radius * 2))
+        } else {
+            let edge = arrow == .diamond ? length / 2 : length
+            context.move(to: CGPoint(x: edge, y: radius))
+            context.addLine(to: .zero)
+            context.addLine(to: CGPoint(x: edge, y: -radius))
+            if arrow == .arrow {
+                context.setLineJoin(.round)
+                context.strokePath()
+            } else {
+                if arrow == .diamond || arrow == .stealth {
+                    context.addLine(to: CGPoint(x: arrow == .diamond ? length : length * 0.72, y: 0))
+                }
+                context.closePath()
+                context.fillPath()
+            }
+        }
+        context.restoreGState()
     }
 
     private static func drawText(_ object: SlideObject, in rect: CGRect, context: CGContext) {

@@ -41,6 +41,9 @@ struct SlideCanvas: Codable, Equatable {
             }
             result.textLayout = layout
         }
+        if let weight = result.connector?.weight {
+            result.connector?.weight = min(96, max(0.25, weight * factor))
+        }
         return result
     }
 }

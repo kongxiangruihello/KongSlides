@@ -11,6 +11,10 @@ struct PowerPointGroup {
 
     var textScale: Double { min(scaleX, scaleY) }
 
+    func point(x: Double, y: Double, unit: Double) -> CGPoint {
+        CGPoint(x: (offsetX + scaleX * x) * unit, y: (offsetY + scaleY * y) * unit)
+    }
+
     func frame(x: Double, y: Double, width: Double, height: Double, unit: Double) -> CGRect? {
         let left = (offsetX + scaleX * x) * unit
         let top = (offsetY + scaleY * y) * unit

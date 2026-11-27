@@ -128,6 +128,18 @@ extension PowerPoint {
                 try Task.checkCancellation()
                 let name = element.localName ?? ""
                 let label = element.powerPointLabel
+                let preset = element.child("spPr")?.child("prstGeom")?.value("prst")
+                if name == "cxnSp" || (name == "sp" && ["line", "lineInv"].contains(preset ?? "")) {
+                    if let imported = ImportedConnector(element, context: context, unit: factor, coordinates: coordinates) {
+                        slide.objects.append(imported.object)
+                        for warning in imported.warnings {
+                            note(.geometry, "连接线「\(label)」\(warning)", object: imported.object.id)
+                        }
+                    } else {
+                        note(.unsupported, "连接线「\(label)」的路径、尺寸或线条样式无法转换。")
+                    }
+                    continue
+                }
                 if name == "graphicFrame", let table = element.child("graphic")?.child("graphicData")?.child("tbl") {
                     if let imported = ImportedTable(table, transform: element.child("xfrm"), context: context, unit: factor, coordinates: coordinates) {
                         slide.objects.append(imported.object)
@@ -140,7 +152,7 @@ extension PowerPoint {
                     continue
                 }
                 guard name == "sp" || name == "pic" else {
-                    let type = ["graphicFrame": "图表或 SmartArt", "cxnSp": "连接线"][name] ?? "对象"
+                    let type = ["graphicFrame": "图表或 SmartArt"][name] ?? "对象"
                     note(.unsupported, "\(type)「\(label)」未转换。")
                     continue
                 }
@@ -235,7 +247,6 @@ extension PowerPoint {
                 let textBody = element.child("txBody")
                 let text = textBody?.text(softBreak: "\u{2028}") ?? ""
                 let fill = properties.flatMap { context.color($0) }
-                let preset = properties?.child("prstGeom")?.value("prst")
                 guard !text.isEmpty || fill != nil else {
                     if element.placeholder == nil { note(.unsupported, "「\(label)」的形状或效果未转换。") }
                     continue
