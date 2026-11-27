@@ -26,8 +26,8 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
-      SOURCE_COMMIT: 3aa2e78fcef5af426ce31066fa8b895bc4aec4b5
-      BUILD_RUN: "45969734720"
+      SOURCE_COMMIT: 69196a7693d2721dcf1bb3e3274aec8124b39dbe
+      BUILD_RUN: "45969934205"
     steps:
       - uses: actions/checkout@v4
       - name: Download the tested build
@@ -48,8 +48,8 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
-      SOURCE_COMMIT: 3aa2e78fcef5af426ce31066fa8b895bc4aec4b5
-      BUILD_RUN: "45969734720"
+      SOURCE_COMMIT: 69196a7693d2721dcf1bb3e3274aec8124b39dbe
+      BUILD_RUN: "45969934205"
       EXPECTED_SHA256: ${{ needs.desktop_smoke.outputs.sha256 }}
     steps:
       - name: Verify the macOS build and prepare assets
