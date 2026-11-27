@@ -60,6 +60,8 @@ final class EditorWindowTests: XCTestCase {
         XCTAssertTrue(editor.window === window)
         XCTAssertEqual(session.document.deck.slides.first?.title, "新课件")
         XCTAssertNil(session.fileURL)
+        XCTAssertEqual(session.currentDocumentURL, pptx)
+        XCTAssertEqual(session.screen, .editor)
         XCTAssertTrue(window.title.contains("待导入"))
         XCTAssertFalse(window.isDocumentEdited)
     }
@@ -105,6 +107,44 @@ final class EditorWindowTests: XCTestCase {
         session.open(file)
         try await finishOpening(session)
         XCTAssertEqual(session.activePageID, first.id)
+    }
+
+    @MainActor
+    func testLaunchHomeFavoritesAndResumeWithoutChangingDocumentIdentity() throws {
+        _ = NSApplication.shared
+        let suite = "kongslides-home-tests-\(UUID())"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let session = EditorFileSession(favorites: FavoriteDocuments(defaults: defaults))
+        XCTAssertEqual(session.screen, .home)
+        XCTAssertTrue(session.beginLaunch())
+        XCTAssertEqual(session.screen, .splash)
+        session.finishLaunch()
+        XCTAssertEqual(session.screen, .home)
+        XCTAssertFalse(session.hasDocument)
+
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent("课堂导入.pptx")
+        session.toggleFavorite(file)
+        XCTAssertTrue(session.isFavorite(file))
+        let reloaded = EditorFileSession(favorites: FavoriteDocuments(defaults: defaults))
+        XCTAssertTrue(reloaded.isFavorite(file))
+        reloaded.toggleFavorite(file)
+        XCTAssertTrue(FavoriteDocuments(defaults: defaults).urls.isEmpty)
+
+        session.newDeck()
+        let document = session.identity
+        let page = session.activePageID
+        XCTAssertEqual(session.screen, .editor)
+        session.showHome()
+        XCTAssertTrue(session.hasDocument)
+        XCTAssertEqual(session.screen, .home)
+        session.continueEditing()
+        XCTAssertEqual(session.screen, .editor)
+        XCTAssertEqual(session.identity, document)
+        XCTAssertEqual(session.activePageID, page)
+        session.resetAfterClose()
+        XCTAssertEqual(session.screen, .home)
+        XCTAssertFalse(session.hasDocument)
     }
 
     @MainActor

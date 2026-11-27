@@ -324,7 +324,7 @@ struct EditorView: View {
         .onChange(of: objectID) { if editingID != objectID { editingID = nil } }
         .onChange(of: canvasTextFocused) { if !canvasTextFocused { editingID = nil } }
         .alert("操作未完成", isPresented: Binding(
-            get: { linkedError != nil || session.error != nil },
+            get: { session.screen == .editor && (linkedError != nil || session.error != nil) },
             set: { if !$0 { linkedError = nil; session.error = nil } }
         )) {
             Button("好", role: .cancel) { linkedError = nil; session.error = nil }
@@ -334,6 +334,8 @@ struct EditorView: View {
 
     private var controls: some View {
         HStack(spacing: 13) {
+            Button { session.showHome() } label: { Image(systemName: "house") }
+                .help("返回首页").accessibilityLabel("返回首页")
             HStack(spacing: 8) {
                 Image(systemName: "rectangle.on.rectangle").foregroundStyle(Color.accentColor)
                 Text("KongSlides").font(.headline)
@@ -373,6 +375,11 @@ struct EditorView: View {
             } label: { Label("讲稿", systemImage: showNotes ? "note.text.badge.minus" : "note.text") }
             Menu {
                 Button("打开课件…") { session.chooseFile() }.disabled(importing || session.opening)
+                if let file = session.currentDocumentURL {
+                    Button(session.isFavorite(file) ? "移除课件收藏" : "收藏此课件") {
+                        session.toggleFavorite(file)
+                    }
+                }
                 Button("查看打开耗时…") { showOpenTiming = true }.disabled(session.openTiming == nil)
                 Button("追加 PPTX 页面到当前课件…") { importPowerPoint() }.disabled(importing || session.opening)
                 Button("查看 PPTX 导入报告") { reviewMode = .imported }
@@ -1218,6 +1225,7 @@ struct EditorView: View {
     }
 
     private func handleShortcut(_ event: NSEvent) -> Bool {
+        guard session.screen == .editor else { return false }
         let modifiers = event.modifierFlags.intersection([.command, .shift, .option, .control])
         if modifiers.isEmpty {
             switch event.keyCode {

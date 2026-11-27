@@ -24,7 +24,7 @@ final class AppLifecycle: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         editor.installMenus()
-        editor.showEditor()
+        editor.launch()
         Task { @MainActor in
             try? await Task.sleep(for: .seconds(4))
             await SoftwareUpdate.shared.check(manual: false)

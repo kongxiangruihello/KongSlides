@@ -23,6 +23,16 @@ final class EditorWindow: NSWindowController, NSWindowDelegate, NSMenuDelegate {
 
     required init?(coder: NSCoder) { nil }
 
+    func launch() {
+        let showSplash = session.beginLaunch()
+        showEditor()
+        guard showSplash else { return }
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(620))
+            session.finishLaunch()
+        }
+    }
+
     func showEditor() {
         showWindow(nil)
         if window?.isMiniaturized == true { window?.deminiaturize(nil) }
@@ -35,8 +45,9 @@ final class EditorWindow: NSWindowController, NSWindowDelegate, NSMenuDelegate {
     }
 
     private func updateTitle() {
-        window?.title = "\(session.name) — KongSlides"
-        window?.representedURL = session.fileURL
+        let editing = session.screen == .editor
+        window?.title = editing ? "\(session.name) — KongSlides" : "KongSlides"
+        window?.representedURL = editing ? session.fileURL : nil
         window?.isDocumentEdited = session.isEdited
     }
 
@@ -58,6 +69,8 @@ final class EditorWindow: NSWindowController, NSWindowDelegate, NSMenuDelegate {
 
     @objc private func jumpToPage(_ sender: Any?) {
         showEditor()
+        guard session.hasDocument else { return }
+        session.continueEditing()
         session.pageJumpRequest = UUID()
     }
 
@@ -67,7 +80,12 @@ final class EditorWindow: NSWindowController, NSWindowDelegate, NSMenuDelegate {
         if let url = item.representedObject as? URL { open(url) }
     }
 
-    @objc private func clearRecent(_ sender: Any?) { NSDocumentController.shared.clearRecentDocuments(nil) }
+    @objc private func clearRecent(_ sender: Any?) { session.clearRecent() }
+
+    @objc private func showHome(_ sender: Any?) {
+        showEditor()
+        session.showHome()
+    }
     @objc private func undo(_ sender: Any?) { currentUndoManager.undo() }
     @objc private func redo(_ sender: Any?) { currentUndoManager.redo() }
 
@@ -159,6 +177,8 @@ final class EditorWindow: NSWindowController, NSWindowDelegate, NSMenuDelegate {
         item(edit, "全选", #selector(NSText.selectAll(_:)), "a")
 
         let navigation = addMenu("导航")
+        item(navigation, "返回首页", #selector(showHome(_:)), "1", target: self,
+             modifiers: [.command, .shift])
         item(navigation, "前往幻灯片…", #selector(jumpToPage(_:)), "j", target: self)
 
         let window = addMenu("窗口")
@@ -179,9 +199,22 @@ private struct EditorWindowContent: View {
             get: { session.identity == identity ? session.document : snapshot },
             set: { if session.identity == identity { session.edit($0) } }
         )
-        EditorView(document: document, session: session, documentIdentity: identity)
-            .id(identity)
-            .frame(minWidth: 1040, minHeight: 660)
-            .tint(Color(nsColor: Palette.color(Palette.indigo)))
+        ZStack {
+            if session.hasDocument {
+                let editing = session.screen == .editor
+                EditorView(document: document, session: session, documentIdentity: identity)
+                    .id(identity)
+                    .opacity(editing ? 1 : 0)
+                    .allowsHitTesting(editing)
+                    .accessibilityHidden(!editing)
+            }
+            switch session.screen {
+            case .splash: KongSlidesStartup()
+            case .home: KongSlidesHome(session: session)
+            case .editor: EmptyView()
+            }
+        }
+        .frame(minWidth: 1040, minHeight: 660)
+        .tint(Color(nsColor: Palette.color(Palette.indigo)))
     }
 }

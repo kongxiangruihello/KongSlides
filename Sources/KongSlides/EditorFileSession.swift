@@ -32,6 +32,13 @@ private enum NativeDocumentChanged: LocalizedError {
 
 @MainActor @Observable
 final class EditorFileSession {
+    enum Screen: Equatable { case splash, home, editor }
+
+    private(set) var screen: Screen = .home
+    private(set) var hasDocument = false
+    private(set) var sourceURL: URL?
+    private(set) var favoriteURLs: [URL] = []
+    private(set) var recentURLs: [URL] = []
     private(set) var document = SlidesDocument()
     private(set) var fileURL: URL?
     private(set) var identity = UUID()
@@ -50,11 +57,62 @@ final class EditorFileSession {
     @ObservationIgnored private var savedStamp: NativeDocumentStamp?
 
     @ObservationIgnored private let positions: RecentSlidePositions
+    @ObservationIgnored private let favorites: FavoriteDocuments
 
-    init(positions: RecentSlidePositions = .init()) {
+    init(positions: RecentSlidePositions = .init(), favorites: FavoriteDocuments = .init()) {
         self.positions = positions
+        self.favorites = favorites
+        favoriteURLs = favorites.urls
         savedDeck = document.deck
         activePageID = document.deck.slides.first?.id
+    }
+
+    var currentDocumentURL: URL? { fileURL ?? sourceURL }
+
+    func beginLaunch() -> Bool {
+        guard !opening, !hasDocument, screen == .home else { return false }
+        screen = .splash
+        statusChanged?()
+        return true
+    }
+
+    func finishLaunch() {
+        if screen == .splash { showHome() }
+    }
+
+    func showHome() {
+        refreshRecent()
+        screen = .home
+        statusChanged?()
+    }
+
+    func continueEditing() {
+        guard hasDocument else { return }
+        screen = .editor
+        statusChanged?()
+    }
+
+    func refreshRecent() {
+        var seen = Set<URL>()
+        recentURLs = NSDocumentController.shared.recentDocumentURLs.filter {
+            $0.isFileURL && ["ppt", "pptx", "kongslides"].contains($0.pathExtension.lowercased()) &&
+                seen.insert(FavoriteDocuments.canonical($0)).inserted
+        }
+    }
+
+    func clearRecent() {
+        NSDocumentController.shared.clearRecentDocuments(nil)
+        refreshRecent()
+    }
+
+    func isFavorite(_ url: URL) -> Bool {
+        let target = FavoriteDocuments.canonical(url)
+        return favoriteURLs.contains { FavoriteDocuments.canonical($0) == target }
+    }
+
+    func toggleFavorite(_ url: URL) {
+        favorites.toggle(url)
+        favoriteURLs = favorites.urls
     }
 
     func rememberPage(_ page: UUID, for editor: UUID) {
@@ -89,14 +147,21 @@ final class EditorFileSession {
     }
 
     func chooseFile() {
+        finishLaunch()
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.kongSlides, .slidePowerPoint] + [UTType(filenameExtension: "ppt")].compactMap { $0 }
         if panel.runModal() == .OK, let url = panel.url { open(url) }
     }
 
     func open(_ url: URL, discardEditsToReload: Bool = false) {
-        guard url.isFileURL, ["kongslides", "pptx", "ppt"].contains(url.pathExtension.lowercased()),
-              discardEditsToReload || url.standardizedFileURL != fileURL?.standardizedFileURL else { return }
+        guard url.isFileURL, ["kongslides", "pptx", "ppt"].contains(url.pathExtension.lowercased()) else { return }
+        if !discardEditsToReload, let currentDocumentURL,
+           FavoriteDocuments.canonical(currentDocumentURL) == FavoriteDocuments.canonical(url) {
+            cancelOpening()
+            continueEditing()
+            return
+        }
+        finishLaunch()
         cancelOpening()
         let request = UUID()
         let requestedAt = OpenTiming.now
@@ -132,12 +197,13 @@ final class EditorFileSession {
                 guard operation == request, !work.isCancelled else { return }
                 let destination = url.pathExtension.lowercased() == "kongslides" ? url : nil
                 guard (discardEditsToReload || confirmReplacement()), operation == request, !work.isCancelled else { return }
-                install(opened.deck, at: destination, markEdited: false, stamp: opened.stamp)
+                install(opened.deck, at: destination, markEdited: false, stamp: opened.stamp, source: url)
                 openTiming = OpenTiming(fileName: url.lastPathComponent, pageCount: opened.deck.slides.count,
                                         requestedAt: requestedAt,
                                         readAndConvert: max(0, loadedAt - requestedAt - opened.imagePreparation),
                                         imagePreparation: opened.imagePreparation, uiInstalledAt: OpenTiming.now)
                 NSDocumentController.shared.noteNewRecentDocumentURL(url)
+                refreshRecent()
             } catch {
                 guard operation == request, !work.isCancelled else { return }
                 self.error = "无法打开「\(url.lastPathComponent)」。\n\(error.localizedDescription)"
@@ -176,13 +242,17 @@ final class EditorFileSession {
 
     func resetAfterClose() {
         cancelOpening()
-        install(Deck(), at: nil, markEdited: false)
+        install(Deck(), at: nil, markEdited: false, isClosing: true)
     }
 
-    private func install(_ deck: Deck, at url: URL?, markEdited: Bool, stamp: NativeDocumentStamp? = nil) {
+    private func install(_ deck: Deck, at url: URL?, markEdited: Bool, stamp: NativeDocumentStamp? = nil,
+                         source: URL? = nil, isClosing: Bool = false) {
         undoManager.removeAllActions()
         document = SlidesDocument(deck: deck)
         fileURL = url
+        sourceURL = source
+        hasDocument = !isClosing
+        screen = isClosing ? .home : .editor
         savedStamp = stamp ?? url.flatMap { NativeDocumentStamp(at: $0) }
         let remembered = url.flatMap { positions.page(for: $0) }
         activePageID = deck.slides.first(where: { $0.id == remembered })?.id ?? deck.slides.first?.id
@@ -195,7 +265,7 @@ final class EditorFileSession {
 
     @discardableResult
     func save(asCopy: Bool = false) -> Bool {
-        guard endTextEditing() else { return false }
+        guard hasDocument, endTextEditing() else { return false }
         let destination: URL
         if let fileURL, !asCopy {
             destination = fileURL
@@ -226,6 +296,7 @@ final class EditorFileSession {
             self.error = nil
             statusChanged?()
             NSDocumentController.shared.noteNewRecentDocumentURL(destination)
+            refreshRecent()
             return true
         } catch {
             self.error = "无法保存「\(destination.lastPathComponent)」。\n\(error.localizedDescription)"
