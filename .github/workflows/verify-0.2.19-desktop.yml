@@ -1,0 +1,61 @@
+name: KongSlides 0.2.19 desktop verification
+on:
+  push:
+    branches: [codex/kongslides-0.2.19-desktop]
+    paths: [.github/workflows/verify-0.2.19-desktop.yml, Scripts/verify-0.2.19-editor.swift]
+permissions:
+  actions: read
+  contents: read
+jobs:
+  editor:
+    runs-on: macos-26
+    timeout-minutes: 12
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      BUILD_RUN: "46018909361"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download candidate
+        run: |
+          gh run watch "$BUILD_RUN" --exit-status --interval 4
+          gh run download "$BUILD_RUN" --name KongSlides-macOS-preview --dir candidate
+          ditto -x -k candidate/KongSlides-macOS-preview.zip candidate
+      - name: Test toolbar, panels and Save As on macOS desktop
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="$(mktemp -d)"
+          app="$PWD/candidate/KongSlides.app"
+          defaults write com.kongslides.app checkForUpdatesAutomatically -bool false
+          python3 - "$root/Original.kongslides" <<'PY'
+          import json, sys, uuid
+          with open(sys.argv[1], "w") as out:
+              json.dump({"schemaVersion":1,"slides":[{"id":str(uuid.uuid4()),"background":"F8F5EE",
+                  "section":"Unit","speakerNotes":f"Notes {i}","objects":[]} for i in range(94)],"images":[]},out)
+          PY
+          original_digest="$(shasum -a 256 "$root/Original.kongslides")"
+          swiftc Scripts/verify-0.2.19-editor.swift -o "$root/editor-smoke"
+          open -n -a "$app" "$root/Original.kongslides"
+          pid=""
+          for _ in {1..20}; do
+            pid="$(pgrep -nf "$app/Contents/MacOS/KongSlides" || true)"
+            [[ -n "$pid" ]] && break
+            sleep 1
+          done
+          [[ -n "$pid" ]]
+          "$root/editor-smoke" "$pid"
+          for _ in {1..30}; do
+            [[ -s "$root/Saved copy.kongslides" ]] && break
+            sleep 1
+          done
+          [[ "$(shasum -a 256 "$root/Original.kongslides")" == "$original_digest" ]]
+          python3 - "$root/Saved copy.kongslides" <<'PY'
+          import json, sys
+          with open(sys.argv[1]) as src:
+              deck=json.load(src)
+          assert len(deck["slides"]) == 94
+          assert any(obj["text"] == "Editor smoke" and (obj["bold"] or any(run["bold"] for run in obj.get("textRuns", [])))
+              for obj in deck["slides"][0]["objects"]), deck["slides"][0]["objects"]
+          print("Saved copy reopened as valid 94-page JSON, with bold text entered through the toolbar. Original checksum unchanged.")
+          PY
