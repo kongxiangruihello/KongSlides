@@ -4,7 +4,7 @@ import XCTest
 
 final class OpenWorkflowTests: XCTestCase {
     func testImageCacheReusesVariantsAndReplacesChangedAsset() throws {
-        let data = try XCTUnwrap(Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aTioAAAAASUVORK5CYII="))
+        let data = try XCTUnwrap(Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAFklEQVR4nGOUt0piYGBgYmBgYGBgAAAIqwC/4jgdqwAAAABJRU5ErkJggg=="))
         let cache = SlideImageCache()
         let id = UUID()
         let preview = try XCTUnwrap(cache.picture(data, id: id, thumbnail: true))
@@ -29,6 +29,27 @@ final class OpenWorkflowTests: XCTestCase {
         XCTAssertEqual(summary.pending.map(\.page), [2, 5])
         XCTAssertEqual(summary.next(after: 2)?.page, 5)
         XCTAssertEqual(summary.next(after: 5)?.page, 2)
+    }
+
+    @MainActor
+    func testOpeningNinetyFourPageNativeDeckRecordsSeparatePhases() async throws {
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".kongslides")
+        defer { try? FileManager.default.removeItem(at: file) }
+        let deck = Deck(slides: (1...94).map { Slide.titleSlide("第 \($0) 页", subtitle: "课堂课件") })
+        try SlidesDocument(deck: deck).writeNative(to: file)
+        let session = EditorFileSession()
+        session.open(file)
+        for _ in 0..<200 where session.opening { try await Task.sleep(for: .milliseconds(20)) }
+        let timing = try XCTUnwrap(session.openTiming)
+        XCTAssertEqual(timing.pageCount, 94)
+        XCTAssertEqual(timing.imagePreparation, 0)
+        XCTAssertGreaterThan(timing.readAndConvert, 0)
+        session.recordFirstDraw(for: UUID(), at: OpenTiming.now, imageTime: 0)
+        XCTAssertNil(session.openTiming?.firstDraw)
+        session.recordFirstDraw(for: session.identity, at: OpenTiming.now, imageTime: 0.002)
+        XCTAssertEqual(session.openTiming?.displayImagePreparation, 0.002)
+        for _ in 0..<20 where session.openTiming?.readyAfterDraw == nil { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertNotNil(session.openTiming?.readyAfterDraw)
     }
 
     func testWriteWindowsClassroomFixture() throws {

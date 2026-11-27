@@ -44,7 +44,7 @@ struct SlideSurface: View {
                     }
                 })
             }
-            didDraw?(OpenTiming.now, imageTime)
+            if let didDraw { didDraw(OpenTiming.now, imageTime) }
         }
         .aspectRatio(canvas.width / canvas.height, contentMode: .fit)
         .accessibilityLabel(slide.title)
@@ -567,6 +567,11 @@ struct EditorView: View {
         }
     }
 
+    private var awaitingFirstDraw: Bool {
+        if let timing = session.openTiming { return timing.firstDraw == nil }
+        return false
+    }
+
     private func firstCanvasDraw(_ time: Double, _ imageTime: Double) {
         Task { @MainActor in session.recordFirstDraw(for: documentIdentity, at: time, imageTime: imageTime) }
     }
@@ -580,7 +585,7 @@ struct EditorView: View {
                     .onTapGesture { clearObjectSelection() }
                 ZStack(alignment: .topLeading) {
                     SlideSurface(slide: slide, images: deck.images, omittedObject: editingID, canvas: deck.pageCanvas,
-                                 imageCache: imageCache, didDraw: firstCanvasDraw)
+                                 imageCache: imageCache, didDraw: awaitingFirstDraw ? firstCanvasDraw : nil)
                         .accessibilityIdentifier("editor-canvas-" + slide.id.uuidString)
                         .onTapGesture { clearObjectSelection() }
                         .gesture(objectMarqueeGesture(scale: scale))
