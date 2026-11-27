@@ -157,9 +157,7 @@ struct SlideReviewPanel: View {
                     Button("对照原稿 PDF…", action: compare)
                     Button("导出清单…", action: exportReport).disabled(rows.isEmpty)
                 }
-                Button(action: close) { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary) }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("关闭检查面板")
+                EditorPanelCloseButton(title: "关闭检查面板", identifier: "close-review-panel", action: close)
             }
             if mode == .imported {
                 HStack(spacing: 8) {

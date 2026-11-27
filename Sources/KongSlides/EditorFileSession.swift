@@ -45,6 +45,7 @@ final class EditorFileSession {
     private(set) var identity = UUID()
     private(set) var activePageID: UUID?
     private(set) var opening = false
+    private(set) var saving = false
     private(set) var openTiming: OpenTiming?
     private(set) var progress = ImportProgress()
     var error: String?
@@ -64,6 +65,7 @@ final class EditorFileSession {
     @ObservationIgnored private var reader: Task<OpenedDeck, Error>?
     @ObservationIgnored private var operation: UUID?
     @ObservationIgnored private var savedStamp: NativeDocumentStamp?
+    @ObservationIgnored private var saveDialogOpen = false
 
     @ObservationIgnored private let positions: RecentSlidePositions
     @ObservationIgnored private let favorites: FavoriteDocuments
@@ -233,6 +235,7 @@ final class EditorFileSession {
     }
 
     func open(_ url: URL, discardEditsToReload: Bool = false) {
+        guard !saving, !saveDialogOpen else { return }
         guard url.isFileURL, ["kongslides", "pptx", "ppt"].contains(url.pathExtension.lowercased()) else { return }
         if !discardEditsToReload, let currentDocumentURL,
            FavoriteDocuments.canonical(currentDocumentURL) == FavoriteDocuments.canonical(url) {
@@ -351,15 +354,12 @@ final class EditorFileSession {
 
     @discardableResult
     func save(asCopy: Bool = false) -> Bool {
-        guard hasDocument, endTextEditing() else { return false }
+        guard hasDocument, !saving, !saveDialogOpen, endTextEditing() else { return false }
         let destination: URL
         if let fileURL, !asCopy {
             destination = fileURL
         } else {
-            let panel = NSSavePanel()
-            panel.allowedContentTypes = [.kongSlides]
-            panel.canCreateDirectories = true
-            panel.nameFieldStringValue = name
+            let panel = makeSavePanel()
             guard panel.runModal() == .OK, let url = panel.url else { return false }
             destination = url
         }
@@ -373,18 +373,7 @@ final class EditorFileSession {
                 return resolveSaveConflict(destination)
             }
             try document.writeNative(to: destination)
-            savedStamp = NativeDocumentStamp(at: destination)
-            fileURL = destination
-            savedDeck = document.deck
-            if let page = activePageID, document.deck.slides.contains(where: { $0.id == page }) {
-                positions.remember(page, for: destination)
-            }
-            self.error = nil
-            statusChanged?()
-            NSDocumentController.shared.noteNewRecentDocumentURL(destination)
-            refreshRecent()
-            updateLibrary { $0.noteOpened(destination) }
-            recordWorkplace(destination, renderThumbnail: true)
+            completeSave(to: destination, deck: document.deck, stamp: NativeDocumentStamp(at: destination))
             return true
         } catch {
             self.error = "无法保存「\(destination.lastPathComponent)」。\n\(error.localizedDescription)"
@@ -392,18 +381,99 @@ final class EditorFileSession {
         }
     }
 
+    func requestSave(asCopy: Bool, in window: NSWindow) async {
+        guard hasDocument, !saving, !saveDialogOpen, window.attachedSheet == nil, endTextEditing() else { return }
+        let destination: URL
+        if let fileURL, !asCopy {
+            destination = fileURL
+        } else {
+            let panel = makeSavePanel()
+            saveDialogOpen = true
+            let response = await withCheckedContinuation { continuation in
+                panel.beginSheetModal(for: window) { continuation.resume(returning: $0) }
+            }
+            saveDialogOpen = false
+            guard response == .OK, let url = panel.url else { return }
+            destination = url
+        }
+        do {
+            try await writeRequestedSave(to: destination)
+        } catch NativeDocumentChanged.externalModification where !asCopy {
+            let alert = makeSaveConflictAlert()
+            saveDialogOpen = true
+            let response = await withCheckedContinuation { continuation in
+                alert.beginSheetModal(for: window) { continuation.resume(returning: $0) }
+            }
+            saveDialogOpen = false
+            if response == .alertFirstButtonReturn { await requestSave(asCopy: true, in: window) }
+            if response == .alertThirdButtonReturn { open(destination, discardEditsToReload: true) }
+        } catch {
+            self.error = "无法保存「\(destination.lastPathComponent)」。\n\(error.localizedDescription)"
+        }
+    }
+
+    func writeRequestedSave(to destination: URL) async throws {
+        guard hasDocument, !saving, !saveDialogOpen else { throw CancellationError() }
+        saving = true
+        defer { saving = false }
+        let snapshot = document
+        let original = fileURL
+        let expectedStamp = savedStamp
+        let stamp = try await Task.detached(priority: .userInitiated) {
+            let scoped = destination.startAccessingSecurityScopedResource()
+            defer { if scoped { destination.stopAccessingSecurityScopedResource() } }
+            if original?.resolvingSymlinksInPath().standardizedFileURL == destination.resolvingSymlinksInPath().standardizedFileURL,
+               expectedStamp != NativeDocumentStamp(at: destination) {
+                throw NativeDocumentChanged.externalModification
+            }
+            try snapshot.writeNative(to: destination)
+            return NativeDocumentStamp(at: destination)
+        }.value
+        completeSave(to: destination, deck: snapshot.deck, stamp: stamp)
+    }
+
+    private func makeSavePanel() -> NSSavePanel {
+        let panel = NSSavePanel()
+        panel.title = "另存为课件"
+        panel.prompt = "保存"
+        panel.nameFieldLabel = "文件名："
+        panel.allowedContentTypes = [.kongSlides]
+        panel.canCreateDirectories = true
+        panel.showsTagField = false
+        panel.nameFieldStringValue = name
+        panel.directoryURL = currentDocumentURL?.deletingLastPathComponent()
+        return panel
+    }
+
+    private func completeSave(to destination: URL, deck: Deck, stamp: NativeDocumentStamp?) {
+        savedStamp = stamp
+        fileURL = destination
+        savedDeck = deck
+        if let page = activePageID { positions.remember(page, for: destination) }
+        self.error = nil
+        statusChanged?()
+        NSDocumentController.shared.noteNewRecentDocumentURL(destination)
+        refreshRecent()
+        updateLibrary { $0.noteOpened(destination) }
+        recordWorkplace(destination, renderThumbnail: true)
+    }
+
     private func resolveSaveConflict(_ url: URL) -> Bool {
+        switch makeSaveConflictAlert().runModal() {
+        case .alertFirstButtonReturn: return save(asCopy: true)
+        case .alertThirdButtonReturn: open(url, discardEditsToReload: true); return false
+        default: return false
+        }
+    }
+
+    private func makeSaveConflictAlert() -> NSAlert {
         let alert = NSAlert()
         alert.messageText = "磁盘上的课件已有变化"
         alert.informativeText = "可以把当前修改另存为副本，也可以放弃当前修改并重新载入磁盘版本。"
         alert.addButton(withTitle: "另存为…")
         alert.addButton(withTitle: "取消").keyEquivalent = "\u{1b}"
         alert.addButton(withTitle: "放弃修改并重新载入")
-        switch alert.runModal() {
-        case .alertFirstButtonReturn: return save(asCopy: true)
-        case .alertThirdButtonReturn: open(url, discardEditsToReload: true); return false
-        default: return false
-        }
+        return alert
     }
 
     private func endTextEditing() -> Bool {
@@ -412,7 +482,7 @@ final class EditorFileSession {
     }
 
     func confirmReplacement() -> Bool {
-        guard endTextEditing() else { return false }
+        guard !saving, !saveDialogOpen, endTextEditing() else { return false }
         guard isEdited else { return true }
         let alert = NSAlert()
         alert.messageText = "要保存对「\(name)」的修改吗？"

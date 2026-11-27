@@ -9,10 +9,15 @@ enum SlideFonts {
         return family ? NSFont(descriptor: NSFontDescriptor(fontAttributes: [.family: name]), size: size) : nil
     }
 
-    static func typeface(_ name: String?, size: CGFloat, bold: Bool = false) -> NSFont {
+    static func typeface(_ name: String?, size: CGFloat, bold: Bool = false, italic: Bool = false) -> NSFont {
         let fallback = bold ? NSFont.boldSystemFont(ofSize: size) : NSFont.systemFont(ofSize: size)
-        guard let name, let font = named(name, size: size) else { return fallback }
-        return bold ? NSFont(descriptor: font.fontDescriptor.withSymbolicTraits(.bold), size: size) ?? fallback : font
+        let font = name.flatMap { named($0, size: size) } ?? fallback
+        var traits = font.fontDescriptor.symbolicTraits
+        if bold { traits.insert(.bold) }
+        if italic { traits.insert(.italic) }
+        if !italic && !bold { return font }
+        return NSFont(descriptor: font.fontDescriptor.withSymbolicTraits(traits), size: size)
+            ?? (italic ? NSFontManager.shared.convert(fallback, toHaveTrait: .italicFontMask) : fallback)
     }
 
     static func requested(in deck: Deck) -> [String] {
@@ -77,7 +82,7 @@ struct CJKFontAudit {
         var seenMissing = Set<Character>()
         var seenSubstitution = Set<Character>()
         for (segment, run) in object.textSegments(in: 0..<object.text.utf16.count) {
-            let requested = run?.fontName ?? object.textLayout?.fontName
+            let requested = run?.usesSystemFont == true ? nil : run?.fontName ?? object.textLayout?.fontName
             let font: NSFont
             if let requested {
                 if let known = fonts[requested] {

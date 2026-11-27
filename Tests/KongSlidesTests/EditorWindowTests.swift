@@ -3,6 +3,45 @@ import XCTest
 @testable import KongSlides
 
 final class EditorWindowTests: XCTestCase {
+    @MainActor
+    func testSaveAsWritesAnIndependentLargeCopyAndKeepsTheCurrentPage() async throws {
+        _ = NSApplication.shared
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let suite = "kongslides-save-tests-\(UUID())"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let original = directory.appendingPathComponent("原课件.kongslides")
+        let copy = directory.appendingPathComponent("另存副本.kongslides")
+        let deck = Deck(slides: (1...94).map { Slide.titleSlide("第\($0)页", subtitle: "讲课") })
+        try SlidesDocument(deck: deck).writeNative(to: original)
+        let session = EditorFileSession(positions: RecentSlidePositions(defaults: defaults),
+                                        favorites: FavoriteDocuments(defaults: defaults))
+        session.open(original)
+        try await finishOpening(session)
+        session.rememberPage(deck.slides[79].id, for: session.identity)
+        var edited = session.document
+        edited.deck.slides[79].speakerNotes = "只写入副本"
+        session.edit(edited)
+        try await session.writeRequestedSave(to: copy)
+        XCTAssertFalse(session.saving)
+        XCTAssertFalse(session.isEdited)
+        XCTAssertEqual(session.fileURL, copy)
+        XCTAssertEqual(session.activePageID, deck.slides[79].id)
+        XCTAssertEqual(try SlidesDocument.readNative(original).deck, deck)
+        XCTAssertEqual(try SlidesDocument.readNative(copy).deck, edited.deck)
+
+        let invalid = directory.appendingPathComponent("缺少文件夹/错误目标.kongslides")
+        do {
+            try await session.writeRequestedSave(to: invalid)
+            XCTFail("A save into a missing directory must fail")
+        } catch {
+            XCTAssertEqual(session.fileURL, copy)
+            XCTAssertFalse(session.saving)
+        }
+    }
+
     func testSidebarClicksAlwaysMakeTheClickedPageCurrent() {
         let pages = (0..<6).map { _ in UUID() }
         var state = SidebarPageSelection(current: pages[0], selected: [pages[0]], anchor: pages[0])

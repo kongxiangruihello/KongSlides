@@ -25,7 +25,15 @@ struct SlideCanvas: Codable, Equatable {
         result.textRuns = result.textRuns?.map {
             var run = $0
             run.size = run.size.map(fontSize)
+            if var style = run.characterStyle {
+                style.spacing = min(40, max(-40, style.spacing * factor))
+                run.characterStyle = style
+            }
             return run
+        }
+        if var style = result.characterStyle {
+            style.spacing = min(40, max(-40, style.spacing * factor))
+            result.characterStyle = style
         }
         if var layout = result.textLayout {
             layout.insets.left = min(5000, layout.insets.left * factor)

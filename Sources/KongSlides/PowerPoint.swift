@@ -313,15 +313,22 @@ enum PowerPoint {
         if normal != text { rich?.replaceText(with: normal) }
         var offset = 0
         func xmlRun(_ text: String, _ style: SlideTextRun?) -> String {
+            let style = style ?? rich?.baseTextStyle
             let size = Int(((style?.size ?? fontSize) * 100).rounded())
-            let font = style?.fontName ?? layout?.fontName
+            let font = style?.usesSystemFont == true ? nil : style?.fontName ?? layout?.fontName
             let latin = attribute(font ?? "Arial")
             let eastAsian = attribute(font ?? "+mn-ea")
             let baseline = Int(((style?.baseline ?? 0) * 100_000).rounded())
             let bold = (style?.bold ?? bold) ? 1 : 0
+            let character = style?.characterStyle ?? .init()
+            let italic = character.italic ? 1 : 0
+            let underline = character.underline ? "sng" : "none"
+            let strike = character.strikethrough ? "sngStrike" : "noStrike"
+            let spacing = Int((character.spacing * 100).rounded())
+            let highlight = character.highlight.map { "<a:highlight><a:srgbClr val=\"\($0)\"/></a:highlight>" } ?? ""
             return """
-            <a:r><a:rPr lang="zh-CN" sz="\(size)" b="\(bold)" baseline="\(baseline)">
-            \(fill(style?.color ?? color))<a:latin typeface="\(latin)"/><a:ea typeface="\(eastAsian)"/>
+            <a:r><a:rPr lang="zh-CN" sz="\(size)" b="\(bold)" i="\(italic)" u="\(underline)" strike="\(strike)" spc="\(spacing)" baseline="\(baseline)">
+            \(fill(style?.color ?? color))\(highlight)<a:latin typeface="\(latin)"/><a:ea typeface="\(eastAsian)"/>
             </a:rPr><a:t>\(escaped(text))</a:t></a:r>
             """
         }
@@ -352,6 +359,7 @@ enum PowerPoint {
         case .center: alignment = "ctr"
         case .right: alignment = "r"
         case .justified: alignment = "just"
+        case .distributed: alignment = "dist"
         }
         var children = ""
         if let multiple = format.lineMultiple {

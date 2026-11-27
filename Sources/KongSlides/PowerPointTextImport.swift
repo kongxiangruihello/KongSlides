@@ -169,15 +169,26 @@ struct ImportedText {
                 }
                 let baseline = applied.lazy.compactMap { $0.number("baseline") }.first ?? 0
                 let color = rgb.utf8.count == 6 && Int(rgb, radix: 16) != nil ? rgb : Palette.ink
+                func value(_ name: String) -> String? { applied.lazy.compactMap { $0.value(name) }.first }
+                let highlight = applied.lazy.compactMap { $0.child("highlight") }.first
+                let highlightRGB = highlight?.child("srgbClr")?.value("val") ?? context.schemeColor(highlight?.child("schemeClr"))
+                let character = SlideCharacterStyle(
+                    italic: ["1", "true"].contains(value("i") ?? ""),
+                    underline: value("u").map { $0 != "none" } ?? false,
+                    strikethrough: ["sngStrike", "dblStrike"].contains(value("strike") ?? ""),
+                    highlight: highlightRGB.flatMap { $0.utf8.count == 6 && Int($0, radix: 16) != nil ? $0 : nil },
+                    spacing: min(40, max(-40, (Double(value("spc") ?? "") ?? 0) * 127 * unit))
+                )
                 let run = SlideTextRun(start: offset, length: length, size: pointSize, bold: weight,
-                                       color: color, fontName: font, baseline: min(1, max(-1, baseline / 100_000)))
+                                       color: color, fontName: font, baseline: min(1, max(-1, baseline / 100_000)),
+                                       characterStyle: character == .init() ? nil : character)
                 if let last = runs.indices.last, runs[last].end == offset, runs[last].matchesStyle(run) {
                     runs[last].length += length
                 } else {
                     runs.append(run)
                 }
-                if applied.contains(where: { $0.value("i") == "1" || $0.value("u").map { $0 != "none" } == true ||
-                    $0.child("hlinkClick") != nil }) {
+                if value("u").map({ !["none", "sng"].contains($0) }) == true || value("strike") == "dblStrike" ||
+                    (highlight != nil && character.highlight == nil) || applied.contains(where: { $0.child("hlinkClick") != nil }) {
                     mixed = true
                 }
                 if let fill, context.color(fill) == nil ||
@@ -192,7 +203,8 @@ struct ImportedText {
             case "ctr": format.alignment = .center
             case "r": format.alignment = .right
             case "just": format.alignment = .justified
-            case "dist", "thaiDist", "justLow":
+            case "dist": format.alignment = .distributed
+            case "thaiDist", "justLow":
                 format.alignment = .justified
                 approximateParagraph = true
             default: break

@@ -124,13 +124,7 @@ enum SlideDrawing {
     }
 
     private static func drawText(_ object: SlideObject, in rect: CGRect, context: CGContext) {
-        let frame = SlideText.frame(object, in: rect)
-        context.saveGState()
-        context.addPath(CTFrameGetPath(frame))
-        context.clip()
-        context.textMatrix = .identity
-        CTFrameDraw(frame, context)
-        context.restoreGState()
+        SlideText.draw(object, in: rect, context: context)
     }
 
     private static func drawTable(_ table: SlideTable, in rect: CGRect, context: CGContext) {

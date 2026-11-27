@@ -75,8 +75,13 @@ final class EditorWindow: NSWindowController, NSWindowDelegate, NSMenuDelegate {
         session.pageJumpRequest = UUID()
     }
 
-    @objc private func save(_ sender: Any?) { session.save() }
-    @objc private func saveAs(_ sender: Any?) { session.save(asCopy: true) }
+    @objc private func save(_ sender: Any?) { requestSave(asCopy: false) }
+    @objc private func saveAs(_ sender: Any?) { requestSave(asCopy: true) }
+
+    private func requestSave(asCopy: Bool) {
+        guard let window else { return }
+        Task { await session.requestSave(asCopy: asCopy, in: window) }
+    }
     @objc private func openRecent(_ item: NSMenuItem) {
         if let url = item.representedObject as? URL { open(url) }
     }

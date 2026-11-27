@@ -75,8 +75,7 @@ struct TextRunFormatView: View {
         }
         .padding(20).frame(width: 650)
         .onAppear {
-            runs = object.textRuns ?? [SlideTextRun(start: 0, length: object.text.utf16.count, size: object.fontSize,
-                                                       bold: object.bold, color: object.color, fontName: object.textLayout?.fontName)]
+            runs = object.textRuns ?? [object.baseTextStyle]
             selection = runs.indices.first
         }
     }
@@ -87,7 +86,10 @@ struct TextRunFormatView: View {
                 set: { runs[index].size = min(200, max(8, $0)) }), format: .number)
             Toggle("粗体", isOn: $runs[index].bold)
             TextField("字体名称", text: Binding(get: { runs[index].fontName ?? "" },
-                set: { runs[index].fontName = $0.isEmpty ? nil : $0 }))
+                set: {
+                    runs[index].fontName = $0.isEmpty ? nil : $0
+                    runs[index].usesSystemFont = nil
+                }))
             ColorPicker("颜色", selection: Binding(
                 get: { Color(nsColor: Palette.color(runs[index].color)) },
                 set: { color in

@@ -90,6 +90,8 @@ struct EditorView: View {
     @State private var additionalObjects = Set<UUID>()
     @GestureState private var objectMarquee: CGRect?
     @State private var editingID: UUID?
+    @State private var selectedTextRanges: [Range<Int>] = []
+    @State private var selectNewText = false
     @State private var linkedError: String?
     @State private var reviewMode: SlideReviewMode?
     @State private var preflightRows: [SlideReviewRow] = []
@@ -98,12 +100,12 @@ struct EditorView: View {
     @State private var importing = false
     @State private var importTask: Task<PowerPoint.ImportedDeck, Error>?
     @State private var importProgress = ImportProgress()
-    @State private var showNotes = true
+    @AppStorage("showSpeakerNotes") private var showNotes = true
+    @AppStorage("showLayoutInspector") private var showInspector = true
     @AppStorage("sidebarWidth") private var sidebarWidth = 206.0
     @GestureState private var sidebarDrag = 0.0
     @State private var search = ""
     @State private var presenter = PresentationController()
-    @FocusState private var canvasTextFocused: Bool
 
     init(document: Binding<SlidesDocument>, session: EditorFileSession, documentIdentity: UUID) {
         _document = document
@@ -124,10 +126,33 @@ struct EditorView: View {
         return additionalObjects.union(objectID.map { [$0] } ?? []).intersection(valid)
     }
     private var selection: Int? { slide.objects.firstIndex { $0.id == objectID } }
+    private var formattingObject: SlideObject? {
+        guard selectedObjects.count == 1, let selection else { return nil }
+        let object = slide.objects[selection]
+        return object.kind == .text && !object.isLocked ? object : nil
+    }
 
     var body: some View {
         VStack(spacing: 0) {
             controls
+            Divider()
+            EditorFormattingToolbar(
+                object: formattingObject,
+                ranges: formattingObject.map { object in
+                    selectedTextRanges.filter { $0.upperBound <= object.text.utf16.count }
+                } ?? [],
+                insertTextBox: insertTextBox,
+                update: formatSelectedText
+            )
+            if session.saving {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("正在保存课件…").font(.caption)
+                    Spacer()
+                }
+                .padding(.horizontal, 16).padding(.vertical, 6)
+                .accessibilityIdentifier("saving-deck")
+            }
             if importing || session.opening {
                 let progress = session.opening ? session.progress : importProgress
                 HStack {
@@ -167,8 +192,10 @@ struct EditorView: View {
                         reviewPanel(reviewMode)
                     }
                 }
-                Divider()
-                inspector.frame(width: 230)
+                if showInspector {
+                    Divider()
+                    inspector.frame(width: 230)
+                }
             }
         }
         .background(Color(nsColor: .windowBackgroundColor))
@@ -330,8 +357,12 @@ struct EditorView: View {
             additionalObjects.removeAll()
             editingID = nil
         }
-        .onChange(of: objectID) { if editingID != objectID { editingID = nil } }
-        .onChange(of: canvasTextFocused) { if !canvasTextFocused { editingID = nil } }
+        .onChange(of: objectID) {
+            if editingID != objectID {
+                editingID = nil
+                selectedTextRanges = []
+            }
+        }
         .alert("操作未完成", isPresented: Binding(
             get: { session.screen == .editor && (linkedError != nil || session.error != nil) },
             set: { if !$0 { linkedError = nil; session.error = nil } }
@@ -360,7 +391,6 @@ struct EditorView: View {
                 Button("保存当前页为版式…", action: saveCurrentTemplate)
             } label: { Label("新建页", systemImage: "plus.rectangle") }
             .fixedSize()
-            Button { addObject(SlideObject()) } label: { Label("文字", systemImage: "textformat") }
             Button(action: addImage) { Label("图片", systemImage: "photo") }
             Menu {
                 Button("矩形") {
@@ -382,6 +412,13 @@ struct EditorView: View {
             Button {
                 showNotes.toggle()
             } label: { Label("讲稿", systemImage: showNotes ? "note.text.badge.minus" : "note.text") }
+            .help(showNotes ? "隐藏逐字讲稿" : "显示逐字讲稿")
+            .accessibilityIdentifier("toggle-notes-panel")
+            Button { showInspector.toggle() } label: { Image(systemName: "sidebar.right") }
+                .foregroundStyle(showInspector ? Color.accentColor : Color.primary)
+                .help(showInspector ? "隐藏右侧版面属性" : "显示右侧版面属性")
+                .accessibilityLabel(showInspector ? "隐藏右侧版面属性" : "显示右侧版面属性")
+                .accessibilityIdentifier("toggle-inspector-panel")
             Menu {
                 Button("打开课件…") { session.chooseFile() }.disabled(importing || session.opening)
                 if let file = session.currentDocumentURL {
@@ -639,10 +676,12 @@ struct EditorView: View {
         objectID = nil
         additionalObjects.removeAll()
         editingID = nil
+        selectedTextRanges = []
     }
 
     private func chooseObject(_ id: UUID, extend: Bool = NSEvent.modifierFlags.contains(.shift)) {
         focusCanvas()
+        selectedTextRanges = []
         if extend, let current = objectID, current != id {
             if additionalObjects.contains(id) { additionalObjects.remove(id) }
             else { additionalObjects.insert(id) }
@@ -753,14 +792,13 @@ struct EditorView: View {
         let width = CGFloat(object.width) * scale
         let height = CGFloat(object.height) * scale
         if editingID == object.id {
-            TextEditor(text: textBinding(object.id))
-                .font(.system(size: object.fontSize * scale, weight: object.bold ? .bold : .regular))
-                .foregroundStyle(Color(nsColor: Palette.color(object.color)))
-                .scrollContentBackground(.hidden)
+            CanvasTextEditor(object: object, scale: scale, selectAll: selectNewText, edit: { value in
+                textBinding(object.id).wrappedValue = value
+            }, select: { selectedTextRanges = $0 }, finish: {
+                if editingID == object.id { editingID = nil }
+            })
+                .id(object.id)
                 .background(Color(nsColor: Palette.color(slide.background)))
-                .focused($canvasTextFocused)
-                .onAppear { canvasTextFocused = true }
-                .onExitCommand { editingID = nil }
                 .frame(width: width, height: height)
                 .overlay(Rectangle().strokeBorder(Color.accentColor, lineWidth: 2).allowsHitTesting(false))
                 .position(x: object.x * scale + width / 2, y: object.y * scale + height / 2)
@@ -777,7 +815,10 @@ struct EditorView: View {
                           },
                           edit: {
                               chooseObject(object.id, extend: false)
-                              if object.kind == .text { editingID = object.id }
+                              if object.kind == .text {
+                                  selectNewText = false
+                                  editingID = object.id
+                              }
                               if object.kind == .table { editTable = object }
                           },
                           move: { offset in
@@ -807,6 +848,7 @@ struct EditorView: View {
                 Spacer()
                 Stepper("\(Int(notesFontSize)) 磅", value: $notesFontSize, in: 12...36)
                 Button("专注视图") { notesFocus = true }
+                EditorPanelCloseButton(title: "关闭逐字讲稿", identifier: "close-notes-panel") { showNotes = false }
             }
             TextEditor(text: slideBinding(\.speakerNotes))
                 .font(.system(size: notesFontSize))
@@ -819,9 +861,24 @@ struct EditorView: View {
     }
 
     private var inspector: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("版面属性").font(.headline)
+                Spacer()
+                EditorPanelCloseButton(title: "关闭右侧版面属性", identifier: "close-inspector-panel") {
+                    showInspector = false
+                }
+            }
+            .padding(.horizontal, 14).padding(.vertical, 8)
+            Divider()
+            inspectorContents
+        }
+        .background(Color(nsColor: .controlBackgroundColor))
+    }
+
+    private var inspectorContents: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
-                Text("版面属性").font(.headline)
                 Button("幻灯片尺寸…") { canvasSheet = true }
                 Button("学术引文与出处…") { citationSheet = true }
                 Toggle("课堂书签", isOn: Binding(get: { slide.bookmarked == true },
@@ -1154,14 +1211,7 @@ struct EditorView: View {
     private func setAlignment(_ alignment: SlideParagraph.Alignment, for id: UUID) {
         guard let position = slide.objects.firstIndex(where: { $0.id == id }) else { return }
         var object = slide.objects[position]
-        var layout = object.textLayout ?? .init()
-        let count = object.text.components(separatedBy: "\n").count
-        layout.paragraphs = (0..<count).map { index in
-            var style = layout.paragraphs.indices.contains(index) ? layout.paragraphs[index] : .init()
-            style.alignment = alignment
-            return style
-        }
-        object.textLayout = layout
+        object.formatParagraphs(in: []) { _, paragraph in paragraph.alignment = alignment }
         document.deck.slides[index].objects[position] = object
     }
 
@@ -1422,6 +1472,24 @@ struct EditorView: View {
         document.deck.slides[index].objects.append(object)
         objectID = object.id
         pageCommands = false
+    }
+
+    private func insertTextBox() {
+        let object = SlideCanvas.widescreen.fitting(SlideObject(), into: deck.pageCanvas)
+        editingID = nil
+        additionalObjects.removeAll()
+        selectedTextRanges = []
+        selectNewText = true
+        addObject(object)
+        editingID = object.id
+    }
+
+    private func formatSelectedText(_ transform: (inout SlideObject) -> Void) {
+        guard var object = formattingObject, let selection else { return }
+        let oldText = object.text
+        transform(&object)
+        if oldText != object.text { selectedTextRanges = [] }
+        document.deck.slides[index].objects[selection] = object
     }
 
     private func changeLayer(_ id: UUID, front: Bool) {

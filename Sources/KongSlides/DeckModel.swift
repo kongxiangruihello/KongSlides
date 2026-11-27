@@ -30,7 +30,7 @@ struct SlideTextLayout: Codable, Equatable {
 }
 
 struct SlideParagraph: Codable, Equatable {
-    enum Alignment: String, Codable, CaseIterable { case left, center, right, justified }
+    enum Alignment: String, Codable, CaseIterable { case left, center, right, justified, distributed }
 
     enum Bullet: Codable, Equatable {
         case symbol(String)
@@ -152,6 +152,7 @@ struct SlideObject: Codable, Identifiable, Equatable {
     var imageID: UUID?
     var textLayout: SlideTextLayout?
     var textRuns: [SlideTextRun]?
+    var characterStyle: SlideCharacterStyle?
     var pictureCrop: PictureCrop?
     var pictureAppearance: PictureAppearance?
     var table: SlideTable?
@@ -315,7 +316,9 @@ struct Deck: Codable, Equatable {
             for object in slide.objects {
                 guard abs(object.x) <= 10_000, abs(object.y) <= 10_000,
                       (1...10_000).contains(object.width), (1...10_000).contains(object.height),
-                      (8...200).contains(object.fontSize), object.textLayout?.isValid != false, object.pictureCrop?.isValid != false, object.pictureAppearance?.isValid != false, object.validTextRuns else {
+                      (8...200).contains(object.fontSize), object.textLayout?.isValid != false,
+                      object.characterStyle?.isValid != false, object.pictureCrop?.isValid != false,
+                      object.pictureAppearance?.isValid != false, object.validTextRuns else {
                     throw CocoaError(.fileReadCorruptFile)
                 }
                 guard object.kind != .table || object.table?.isValid == true,

@@ -63,4 +63,46 @@ final class CompatibilityRecoveryTests: XCTestCase {
         XCTAssertEqual(object.textRuns?.map(\.start), [0, 4])
         XCTAssertEqual(object.textRuns?.map(\.length), [4, 1])
     }
+
+    func testToolbarStylesRoundTripThroughNativeAndPowerPoint() throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: folder) }
+
+        var object = SlideObject(text: "甲𠮷ß\n第二段", fontSize: 24)
+        let character = SlideCharacterStyle(italic: true, underline: true, strikethrough: true,
+                                            highlight: "FFE766", spacing: 1.5)
+        object.formatCharacters(in: [1..<4]) {
+            $0.fontName = "Arial"
+            $0.characterStyle = character
+            $0.baseline = 0.3
+            $0.size = 13.5
+        }
+        object.changeLetterCase(in: [1..<4], uppercase: true)
+        object.formatParagraphs(in: [0..<5]) { _, paragraph in
+            paragraph.alignment = .distributed
+            paragraph.bullet = .numbered(1, "arabicPeriod")
+            paragraph.left = 16
+            paragraph.lineMultiple = 1.5
+        }
+        XCTAssertEqual(object.text, "甲𠮷SS\n第二段")
+        XCTAssertEqual(object.textRuns?.first?.start, 1)
+        XCTAssertEqual(object.textRuns?.first?.length, 4)
+        XCTAssertEqual(object.paragraphStyles[1], .init())
+        XCTAssertTrue(object.validTextRuns)
+        let deck = Deck(slides: [Slide(objects: [object])])
+        let native = folder.appendingPathComponent("格式.kongslides")
+        try SlidesDocument(deck: deck).writeNative(to: native)
+        XCTAssertEqual(try SlidesDocument.readNative(native).deck, deck)
+        let pptx = folder.appendingPathComponent("格式.pptx")
+        try PowerPoint.write(deck, to: pptx)
+        let reopened = try PowerPoint.read(pptx, prepareImage: { $0 }).deck
+        let imported = try XCTUnwrap(reopened.slides.first?.objects.first)
+        XCTAssertEqual(imported.text, object.text)
+        XCTAssertEqual(imported.formattingStyles(in: [1..<5]).first?.characterStyle, character)
+        XCTAssertEqual(imported.formattingStyles(in: [1..<5]).first?.size, 13.5)
+        XCTAssertEqual(imported.formattingStyles(in: [1..<5]).first?.baseline, 0.3)
+        XCTAssertEqual(imported.paragraphStyles.first, object.paragraphStyles.first)
+        XCTAssertNil(imported.formattingStyles(in: [0..<1]).first?.characterStyle)
+    }
 }

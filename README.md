@@ -1,6 +1,6 @@
 # KongSlides
 
-KongSlides 0.2.18 是面向高校课堂的 macOS 课件编辑与放映原型。应用使用 SwiftUI 与 AppKit，文档和素材保存在本机。最低支持 macOS 15。
+KongSlides 0.2.19 是面向高校课堂的 macOS 课件编辑与放映原型。应用使用 SwiftUI 与 AppKit，文档和素材保存在本机。最低支持 macOS 15。
 
 PPTX 表格保留行列比例、合并单元格、文字与直接设置的纯色填充。导入后，双击表格或从右侧面板编辑单元格。导出 PPTX 时表格保持可编辑，投影和 PDF 也包含表格。依赖 PowerPoint 主题的表格样式及特殊边框会简化，导入报告给出提示。
 

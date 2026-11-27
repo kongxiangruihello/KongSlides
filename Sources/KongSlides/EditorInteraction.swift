@@ -25,6 +25,7 @@ struct EditorKeyMonitor: NSViewRepresentable {
         coordinator.view = view
         coordinator.monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak coordinator] event in
             guard let coordinator, let window = coordinator.view?.window, event.window === window,
+                  window.attachedSheet == nil, NSApp.modalWindow == nil,
                   !(window.firstResponder is NSTextView), coordinator.handle(event) else { return event }
             return nil
         }
