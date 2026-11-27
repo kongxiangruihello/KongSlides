@@ -2048,7 +2048,7 @@ struct EditorView: View {
             }
         case .batch:
             let pages = selectedPages
-            let names = deck.slides.enumerated().compactMap { index, page in
+            let names: [String] = deck.slides.enumerated().compactMap { index, page in
                 guard pages.contains(page.id) else { return nil }
                 let labels = page.objects.filter { $0.kind == .text && !$0.isLocked && $0.decorationSource == nil }.map(\.label)
                 return "第 \(index + 1) 页 · " + (labels.isEmpty ? page.title : labels.joined(separator: "、"))
