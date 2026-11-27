@@ -6,6 +6,8 @@ guard let pid = Int32(CommandLine.arguments[1]), AXIsProcessTrusted(), CGPreflig
     exit(1)
 }
 let app = AXUIElementCreateApplication(pid)
+setbuf(stdout, nil)
+if let running = NSRunningApplication(processIdentifier: pid) { running.activate() }
 
 func attr(_ item: AXUIElement, _ key: String) -> CFTypeRef? {
     var value: CFTypeRef?
@@ -46,24 +48,29 @@ func until<T>(_ name: String, _ check: () -> T?) -> T {
         Thread.sleep(forTimeInterval: 0.10)
     }
     fputs("Timed out waiting for \(name)\n", stderr)
-    if let sheet = saveSheet() { dump(sheet) }
+    if let sheet = saveSheet() { dump(sheet) } else { dump(app) }
     exit(1)
 }
 
 func click(_ id: String) {
-    let item = until(id) { element(id) }
-    if AXUIElementPerformAction(item, kAXPressAction as CFString) == .success { return }
-    guard let location = attr(item, kAXPositionAttribute), let dimensions = attr(item, kAXSizeAttribute),
-          CFGetTypeID(location) == AXValueGetTypeID(), CFGetTypeID(dimensions) == AXValueGetTypeID() else { exit(3) }
-    var point = CGPoint.zero
-    var size = CGSize.zero
-    AXValueGetValue(location as! AXValue, .cgPoint, &point)
-    AXValueGetValue(dimensions as! AXValue, .cgSize, &size)
-    point.x += size.width / 2
-    point.y += size.height / 2
-    for kind: CGEventType in [.mouseMoved, .leftMouseDown, .leftMouseUp] {
-        CGEvent(mouseEventSource: nil, mouseType: kind, mouseCursorPosition: point, mouseButton: .left)?.post(tap: .cghidEventTap)
+    print("Clicking \(id)")
+    _ = until(id) {
+        guard let item = element(id) else { return nil as Bool? }
+        if AXUIElementPerformAction(item, kAXPressAction as CFString) == .success { return true }
+        guard let location = attr(item, kAXPositionAttribute), let dimensions = attr(item, kAXSizeAttribute),
+              CFGetTypeID(location) == AXValueGetTypeID(), CFGetTypeID(dimensions) == AXValueGetTypeID() else { return nil }
+        var point = CGPoint.zero
+        var size = CGSize.zero
+        guard AXValueGetValue(location as! AXValue, .cgPoint, &point),
+              AXValueGetValue(dimensions as! AXValue, .cgSize, &size), size.width > 0, size.height > 0 else { return nil }
+        point.x += size.width / 2
+        point.y += size.height / 2
+        for kind: CGEventType in [.mouseMoved, .leftMouseDown, .leftMouseUp] {
+            CGEvent(mouseEventSource: nil, mouseType: kind, mouseCursorPosition: point, mouseButton: .left)?.post(tap: .cghidEventTap)
+        }
+        return true
     }
+    Thread.sleep(forTimeInterval: 0.25)
 }
 
 func key(_ code: CGKeyCode, _ flags: CGEventFlags = []) {
@@ -116,10 +123,14 @@ let field = until("file name field") {
 }
 let selected = AXUIElementSetAttributeValue(field, kAXFocusedAttribute as CFString, kCFBooleanTrue)
 print("Save As name field focus result \(selected.rawValue)")
-key(0, .maskCommand)
-NSPasteboard.general.clearContents()
-NSPasteboard.general.setString("Saved copy", forType: .string)
-key(9, .maskCommand)
+let nameStatus = AXUIElementSetAttributeValue(field, kAXValueAttribute as CFString, "Saved copy" as CFString)
+print("Save As name field value result \(nameStatus.rawValue)")
+if nameStatus != .success {
+    key(0, .maskCommand)
+    NSPasteboard.general.clearContents()
+    NSPasteboard.general.setString("Saved copy", forType: .string)
+    key(9, .maskCommand)
+}
 _ = until("new filename written to the Save As field") {
     (attr(field, kAXValueAttribute) as? String)?.hasPrefix("Saved copy") == true ? true : nil
 }
