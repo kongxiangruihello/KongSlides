@@ -20,7 +20,7 @@ cleanup() {
 trap cleanup EXIT
 
 gh release download v0.2.15 --pattern KongSlides-0.2.15-macOS-preview.zip --dir "$root"
-printf '%s  %s\n' undefined \
+printf '%s  %s\n' c642ea5f5f6a7a9b63e8d7202073615d6e59ae757a8bf18cb2600dedffa3e40c \
     "$root/KongSlides-0.2.15-macOS-preview.zip" | shasum -a 256 -c
 ditto -x -k "$root/KongSlides-0.2.15-macOS-preview.zip" "$root/old"
 ditto -x -k "$1" "$root/new"
