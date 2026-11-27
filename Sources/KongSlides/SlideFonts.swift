@@ -16,25 +16,37 @@ enum SlideFonts {
     }
 
     static func requested(in deck: Deck) -> [String] {
-        let objects = deck.slides.lazy.flatMap(\.objects).filter { $0.kind == .text }
-        let names = objects.flatMap { object in
-            [object.textLayout?.fontName].compactMap { $0 } + (object.textRuns ?? []).compactMap(\.fontName)
+        let objects = deck.slides.lazy.flatMap(\.objects)
+        let names = objects.flatMap { object -> [String] in
+            let text = object.table?.cells.map(\.textObject) ?? (object.kind == .text ? [object] : [])
+            return text.flatMap { item in
+                [item.textLayout?.fontName].compactMap { $0 } + (item.textRuns ?? []).compactMap(\.fontName)
+            }
         }
         return Set(names).sorted { $0.localizedStandardCompare($1) == .orderedAscending }
     }
 
     static func replace(_ old: String, with replacement: String, in deck: inout Deck) {
         guard old != replacement else { return }
+        func change(_ layout: inout SlideTextLayout?, _ runs: inout [SlideTextRun]?) {
+            if layout?.fontName == old { layout?.fontName = replacement }
+            guard var styled = runs else { return }
+            for index in styled.indices where styled[index].fontName == old { styled[index].fontName = replacement }
+            runs = styled
+        }
         for slide in deck.slides.indices {
-            for object in deck.slides[slide].objects.indices {
-                var text = deck.slides[slide].objects[object]
-                guard text.kind == .text else { continue }
-                if text.textLayout?.fontName == old { text.textLayout?.fontName = replacement }
-                if var runs = text.textRuns {
-                    for index in runs.indices where runs[index].fontName == old { runs[index].fontName = replacement }
-                    text.textRuns = runs
+            for index in deck.slides[slide].objects.indices {
+                var object = deck.slides[slide].objects[index]
+                if object.kind == .text { change(&object.textLayout, &object.textRuns) }
+                if var table = object.table {
+                    for cell in table.cells.indices {
+                        var updated = table.cells[cell]
+                        change(&updated.layout, &updated.runs)
+                        table.cells[cell] = updated
+                    }
+                    object.table = table
                 }
-                if text != deck.slides[slide].objects[object] { deck.slides[slide].objects[object] = text }
+                if object != deck.slides[slide].objects[index] { deck.slides[slide].objects[index] = object }
             }
         }
     }

@@ -61,6 +61,7 @@ struct EditorView: View {
     @State private var canvasSheet = false
     @State private var fontReplacementSheet = false
     @State private var formatText: SlideObject?
+    @State private var editTable: SlideObject?
     @State private var recoverySheet = false
     @State private var recoveryID = UUID()
     @State private var recoveryPending: Task<Void, Never>?
@@ -212,6 +213,13 @@ struct EditorView: View {
                 }
             }
         }
+        .sheet(item: $editTable) { object in
+            if let table = object.table {
+                SlideTableEditor(table: table) { updated in
+                    objectBinding(object.id, \.table, fallback: nil).wrappedValue = updated
+                }
+            }
+        }
         .sheet(item: $referencePDF) { reference in
             ReferencePDFView(url: reference.url, deck: deck, selectedSlide: slide.id, replace: replaceWithReference)
         }
@@ -275,6 +283,14 @@ struct EditorView: View {
                 addObject(SlideObject(kind: .rectangle, x: 110, y: 170,
                                       width: 220, height: 100, color: Palette.indigo))
             } label: { Label("形状", systemImage: "rectangle") }
+            Button {
+                let table = SlideTable(columns: [1, 1, 1], rows: [1, 1, 1], cells: (0..<9).map {
+                    SlideTable.Cell(row: $0 / 3, column: $0 % 3, bold: $0 < 3, fill: $0 < 3 ? "EDF2FC" : nil)
+                })
+                let object = SlideObject(kind: .table, x: 110, y: 135, width: 540, height: 168, table: table)
+                addObject(object)
+                editTable = object
+            } label: { Label("表格", systemImage: "tablecells") }
             Spacer(minLength: 3)
             Button {
                 showNotes.toggle()
@@ -362,7 +378,10 @@ struct EditorView: View {
         return deck.slides.filter { row in
             row.section.localizedCaseInsensitiveContains(search) ||
                 row.speakerNotes.localizedCaseInsensitiveContains(search) ||
-                row.objects.contains { $0.kind == .text && $0.text.localizedCaseInsensitiveContains(search) }
+                row.objects.contains { object in
+                    (object.kind == .text && object.text.localizedCaseInsensitiveContains(search)) ||
+                        object.table?.cells.contains { $0.text.localizedCaseInsensitiveContains(search) } == true
+                }
         }
     }
 
@@ -493,6 +512,7 @@ struct EditorView: View {
                               focusCanvas()
                               objectID = object.id
                               if object.kind == .text { editingID = object.id }
+                              if object.kind == .table { editTable = object }
                           },
                           move: { offset in
                               guard let i = slide.objects.firstIndex(where: { $0.id == object.id }) else { return }
@@ -563,6 +583,9 @@ struct EditorView: View {
                     if object.kind == .image {
                         cropControls(object)
                         pictureAppearanceControls(object)
+                    } else if let table = object.table {
+                        Text("\(table.rows.count) 行 × \(table.columns.count) 列").font(.caption)
+                        Button("编辑单元格…") { editTable = object }
                     } else {
                         colorMenu(object.kind == .text ? "文字颜色" : "填充颜色",
                                   selection: objectBinding(object.id, \.color, fallback: Palette.ink),
@@ -594,7 +617,7 @@ struct EditorView: View {
                             objectID = object.id
                         } label: {
                             Label(object.label, systemImage: object.kind == .text ? "textformat" :
-                                    object.kind == .image ? "photo" : "rectangle")
+                                    object.kind == .image ? "photo" : object.kind == .table ? "tablecells" : "rectangle")
                                 .lineLimit(1)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                         }

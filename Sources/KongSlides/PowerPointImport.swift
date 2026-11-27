@@ -129,8 +129,19 @@ extension PowerPoint {
                 let sourceName = element.elementChildren.first { $0.localName?.hasPrefix("nv") == true }?
                     .child("cNvPr")?.value("name")
                 let label = String((sourceName?.isEmpty == false ? sourceName ?? name : name).prefix(60))
+                if name == "graphicFrame", let table = element.child("graphic")?.child("graphicData")?.child("tbl") {
+                    if let imported = ImportedTable(table, transform: element.child("xfrm"), context: context, unit: factor) {
+                        slide.objects.append(imported.object)
+                        for warning in imported.warnings {
+                            note(.unsupported, "表格「\(label)」\(warning)", object: imported.object.id)
+                        }
+                    } else {
+                        note(.unsupported, "表格「\(label)」的尺寸或合并结构无法转换。")
+                    }
+                    continue
+                }
                 guard name == "sp" || name == "pic" else {
-                    let type = ["grpSp": "组合对象", "graphicFrame": "表格、图表或 SmartArt", "cxnSp": "连接线"][name] ?? "对象"
+                    let type = ["grpSp": "组合对象", "graphicFrame": "图表或 SmartArt", "cxnSp": "连接线"][name] ?? "对象"
                     note(.unsupported, "\(type)「\(label)」未转换。")
                     continue
                 }

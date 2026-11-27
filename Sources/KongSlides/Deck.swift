@@ -75,15 +75,42 @@ enum SlideDrawing {
                 context.draw(image, in: object.pictureCrop?.imageRect(inside: rect) ?? rect)
                 context.restoreGState()
             case .text:
-                let frame = SlideText.frame(object, in: rect)
-                context.saveGState()
-                context.addPath(CTFrameGetPath(frame))
-                context.clip()
-                context.textMatrix = .identity
-                CTFrameDraw(frame, context)
-                context.restoreGState()
+                drawText(object, in: rect, context: context)
+            case .table:
+                if let table = object.table { drawTable(table, in: rect, context: context) }
             }
         }
+    }
+
+    private static func drawText(_ object: SlideObject, in rect: CGRect, context: CGContext) {
+        let frame = SlideText.frame(object, in: rect)
+        context.saveGState()
+        context.addPath(CTFrameGetPath(frame))
+        context.clip()
+        context.textMatrix = .identity
+        CTFrameDraw(frame, context)
+        context.restoreGState()
+    }
+
+    private static func drawTable(_ table: SlideTable, in rect: CGRect, context: CGContext) {
+        context.saveGState()
+        context.clip(to: rect)
+        context.setLineWidth(0.6)
+        context.setStrokeColor(Palette.color("D2DAE6").cgColor)
+        let columns = SlideTable.edges(table.columns, across: rect.width)
+        let rows = SlideTable.edges(table.rows, across: rect.height)
+        for cell in table.cells {
+            let area = CGRect(x: rect.minX + columns[cell.column], y: rect.maxY - rows[cell.row + cell.rowSpan],
+                              width: columns[cell.column + cell.columnSpan] - columns[cell.column],
+                              height: rows[cell.row + cell.rowSpan] - rows[cell.row])
+            if let color = cell.fill {
+                context.setFillColor(Palette.color(color).cgColor)
+                context.fill(area)
+            }
+            context.stroke(area)
+            if !cell.text.isEmpty { drawText(cell.textObject, in: area, context: context) }
+        }
+        context.restoreGState()
     }
 
     static func picture(_ data: Data) -> CGImage? {

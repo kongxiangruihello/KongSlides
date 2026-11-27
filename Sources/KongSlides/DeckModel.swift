@@ -89,7 +89,7 @@ struct SlideImportReport: Codable, Equatable {
 }
 
 struct SlideObject: Codable, Identifiable, Equatable {
-    enum Kind: String, Codable { case text, image, rectangle }
+    enum Kind: String, Codable { case text, image, rectangle, table }
 
     var id = UUID()
     var kind: Kind = .text
@@ -106,6 +106,7 @@ struct SlideObject: Codable, Identifiable, Equatable {
     var textRuns: [SlideTextRun]?
     var pictureCrop: PictureCrop?
     var pictureAppearance: PictureAppearance?
+    var table: SlideTable?
 
     var frame: CGRect { CGRect(x: x, y: y, width: width, height: height) }
 
@@ -140,6 +141,7 @@ struct SlideObject: Codable, Identifiable, Equatable {
         case .text: return text.split(separator: "\n").first.map { String($0.prefix(26)) } ?? "文本框"
         case .image: return "图片"
         case .rectangle: return "矩形"
+        case .table: return "表格"
         }
     }
 }
@@ -222,6 +224,9 @@ struct Deck: Codable, Equatable {
                 guard abs(object.x) <= 10_000, abs(object.y) <= 10_000,
                       (1...10_000).contains(object.width), (1...10_000).contains(object.height),
                       (8...200).contains(object.fontSize), object.textLayout?.isValid != false, object.pictureCrop?.isValid != false, object.pictureAppearance?.isValid != false, object.validTextRuns else {
+                    throw CocoaError(.fileReadCorruptFile)
+                }
+                guard object.kind != .table || object.table?.isValid == true else {
                     throw CocoaError(.fileReadCorruptFile)
                 }
                 if object.kind == .image {

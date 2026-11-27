@@ -98,6 +98,8 @@ enum PowerPoint {
                     shapes += textBox(object, id: id)
                 case .rectangle:
                     shapes += rectangle(object, id: id)
+                case .table:
+                    if let table = object.table { shapes += tableXML(table, object: object, id: id) }
                 case .image:
                     if let imageID = object.imageID {
                         links.append(("image", "../media/\(imageID.uuidString).png"))
@@ -182,6 +184,49 @@ enum PowerPoint {
         <p:sp><p:nvSpPr><p:cNvPr id="\(id)" name="Rectangle \(id)"/>
         <p:cNvSpPr/><p:nvPr/></p:nvSpPr>
         <p:spPr>\(geometry(object))\(fill(object.color))<a:ln><a:noFill/></a:ln></p:spPr></p:sp>
+        """
+    }
+
+    private static func tableXML(_ table: SlideTable, object: SlideObject, id: Int) -> String {
+        guard let owners = table.occupancy else { return "" }
+        let columns = SlideTable.edges(table.columns, across: object.width)
+        let rows = SlideTable.edges(table.rows, across: object.height)
+        let grid = table.columns.indices.map { column in
+            "<a:gridCol w=\"\(max(1, emu(columns[column + 1]) - emu(columns[column])))\"/>"
+        }.joined()
+        let body = table.rows.indices.map { row in
+            let cells = table.columns.indices.map { column in
+                let cell = table.cells[owners[row * table.columns.count + column]]
+                let horizontal = column != cell.column
+                let vertical = row != cell.row
+                var attributes = ""
+                if !horizontal && cell.columnSpan > 1 { attributes += " gridSpan=\"\(cell.columnSpan)\"" }
+                if !vertical && cell.rowSpan > 1 { attributes += " rowSpan=\"\(cell.rowSpan)\"" }
+                if horizontal { attributes += " hMerge=\"1\"" }
+                if vertical { attributes += " vMerge=\"1\"" }
+                if horizontal || vertical {
+                    return "<a:tc\(attributes)><a:txBody><a:bodyPr/><a:lstStyle/><a:p/></a:txBody><a:tcPr/></a:tc>"
+                }
+                let inset = cell.layout?.insets ?? .init()
+                let lines = ["lnL", "lnR", "lnT", "lnB"].map { name in
+                    "<a:\(name) w=\"7620\">\(fill("D2DAE6"))</a:\(name)>"
+                }.joined()
+                return """
+                <a:tc\(attributes)><a:txBody><a:bodyPr/><a:lstStyle/>
+                \(paragraphs(cell.text, fontSize: cell.fontSize, bold: cell.bold, color: cell.color,
+                             layout: cell.layout, object: cell.textObject))</a:txBody>
+                <a:tcPr marL="\(emu(inset.left))" marR="\(emu(inset.right))" marT="\(emu(inset.top))" marB="\(emu(inset.bottom))">
+                \(lines)\(cell.fill.map(fill) ?? "<a:noFill/>")</a:tcPr></a:tc>
+                """
+            }.joined()
+            return "<a:tr h=\"\(max(1, emu(rows[row + 1]) - emu(rows[row])))\">\(cells)</a:tr>"
+        }.joined()
+        return """
+        <p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id="\(id)" name="Table \(id)"/><p:cNvGraphicFramePr/><p:nvPr/></p:nvGraphicFramePr>
+        <p:xfrm><a:off x="\(emu(object.x))" y="\(emu(object.y))"/>
+        <a:ext cx="\(emu(object.width))" cy="\(emu(object.height))"/></p:xfrm>
+        <a:graphic><a:graphicData uri="\(a)/table"><a:tbl><a:tblPr/><a:tblGrid>\(grid)</a:tblGrid>\(body)</a:tbl></a:graphicData></a:graphic>
+        </p:graphicFrame>
         """
     }
 
