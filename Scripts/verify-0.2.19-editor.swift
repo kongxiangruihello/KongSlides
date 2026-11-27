@@ -30,12 +30,23 @@ func element(_ id: String) -> AXUIElement? {
     }
 }
 
+func dump(_ item: AXUIElement, depth: Int = 0) {
+    guard depth < 9 else { return }
+    let facts = [kAXRoleAttribute, kAXIdentifierAttribute, kAXTitleAttribute, kAXDescriptionAttribute,
+                 kAXValueAttribute, kAXEnabledAttribute].compactMap { attr(item, $0) }.map { String(describing: $0) }
+    fputs(String(repeating: " ", count: depth) + facts.joined(separator: " | ") + "\n", stderr)
+    for child in (attr(item, kAXChildrenAttribute) as? [AXUIElement] ?? []).prefix(30) {
+        dump(child, depth: depth + 1)
+    }
+}
+
 func until<T>(_ name: String, _ check: () -> T?) -> T {
     for _ in 0..<120 {
         if let value = check() { return value }
         Thread.sleep(forTimeInterval: 0.10)
     }
     fputs("Timed out waiting for \(name)\n", stderr)
+    if let sheet = saveSheet() { dump(sheet) }
     exit(1)
 }
 
@@ -101,12 +112,25 @@ _ = until("Save As cancellation") { saveSheet() == nil ? true : nil }
 key(1, [.maskCommand, .maskShift])
 let sheet = until("second Save As sheet") { saveSheet() }
 let field = until("file name field") {
-    find(sheet) { attr($0, kAXRoleAttribute) as? String == kAXTextFieldRole }
+    find(sheet) { attr($0, kAXRoleAttribute) as? String == kAXTextFieldRole && (attr($0, kAXValueAttribute) as? String)?.hasPrefix("Original") == true }
 }
 let selected = AXUIElementSetAttributeValue(field, kAXFocusedAttribute as CFString, kCFBooleanTrue)
 print("Save As name field focus result \(selected.rawValue)")
 key(0, .maskCommand)
-type("Saved copy")
-key(36)
+NSPasteboard.general.clearContents()
+NSPasteboard.general.setString("Saved copy", forType: .string)
+key(9, .maskCommand)
+_ = until("new filename written to the Save As field") {
+    (attr(field, kAXValueAttribute) as? String)?.hasPrefix("Saved copy") == true ? true : nil
+}
+let save = until("Save button") {
+    find(sheet) { item in
+        let title = attr(item, kAXTitleAttribute) as? String
+        return attr(item, kAXRoleAttribute) as? String == kAXButtonRole && (title == "保存" || title == "Save")
+    }
+}
+let status = AXUIElementPerformAction(save, kAXPressAction as CFString)
+print("Save button AX press result \(status.rawValue)")
+guard status == .success else { dump(sheet); exit(4) }
 _ = until("Save As confirmation") { saveSheet() == nil ? true : nil }
 print("Save As opened as a sheet, cancelled, reopened and confirmed.")
