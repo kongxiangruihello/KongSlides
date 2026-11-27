@@ -1,4 +1,5 @@
 import Foundation
+import CoreGraphics
 import PDFKit
 import XCTest
 @testable import KongSlides
@@ -117,6 +118,49 @@ final class TeachingToolsTests: XCTestCase {
             XCTAssertEqual(entries.count, 3)
             XCTAssertTrue(entries.allSatisfy { PDFDocument(url: $0)?.pageCount == 1 })
         }
+    }
+
+
+    func testPreviewLayoutUsesGeneratedPageRangesAndPlacesNotesOnContinuation() throws {
+        let first = TeachingDraft(section: "原典", title: "章首")
+        let second = TeachingDraft(section: "原典", title: "原文", blocks: [
+            TeachingBlock(text: String(repeating: "仁者爱人，礼者敬人。", count: 130), destination: .projection),
+            TeachingBlock(text: "第一页的说明", destination: .notes),
+            TeachingBlock(text: "续页的说明", destination: .notes, notesPage: 2)
+        ])
+        let layout = try TeachingGenerator.layout([first, second], template: .classroom)
+        let range = try XCTUnwrap(layout.ranges[second.id])
+        XCTAssertEqual(layout.ranges[first.id], 0..<1)
+        XCTAssertGreaterThan(range.count, 1)
+        XCTAssertEqual(range.upperBound, layout.clipboard.slides.count)
+        XCTAssertEqual(layout.clipboard.slides[range.lowerBound].speakerNotes, "第一页的说明")
+        XCTAssertEqual(layout.clipboard.slides[range.lowerBound + 1].speakerNotes, "续页的说明")
+    }
+
+    func testReferencePDFPairsBySourcePageAndPreservesNotesWhenReplacing() throws {
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).appendingPathExtension("pdf")
+        defer { try? FileManager.default.removeItem(at: file) }
+        let exported = Deck(slides: [Slide(), Slide.titleSlide("Reference", subtitle: "Original")])
+        try SlideDrawing.pdf(exported, to: file)
+        let pdf = try XCTUnwrap(CGPDFDocument(file as CFURL))
+        var slide = Slide(section: "经学史", speakerNotes: "逐字讲稿", hiddenInShow: true)
+        slide.importReport = SlideImportReport(sourceName: "原稿.pptx", sourcePage: 2, diagnostics: [])
+        let page = try XCTUnwrap(ReferencePDF.pageIndex(for: slide, position: 0, pageCount: pdf.numberOfPages))
+        XCTAssertEqual(page, 1)
+        let image = try ReferencePDF.image(in: pdf, page: page)
+        XCTAssertEqual(image.width, 2400)
+        XCTAssertEqual(image.height, 1350)
+
+        let oldID = slide.id
+        let asset = UUID()
+        ReferencePDF.replace(&slide, with: asset, size: CGSize(width: image.width, height: image.height))
+        XCTAssertEqual(slide.id, oldID)
+        XCTAssertEqual(slide.speakerNotes, "逐字讲稿")
+        XCTAssertEqual(slide.section, "经学史")
+        XCTAssertTrue(slide.isBackup)
+        XCTAssertEqual(slide.importReport?.sourcePage, 2)
+        XCTAssertEqual(slide.objects.first?.imageID, asset)
+        XCTAssertEqual(slide.objects.first?.frame, CGRect(origin: .zero, size: Deck.size))
     }
 
 }

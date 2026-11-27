@@ -63,6 +63,7 @@ struct SlideReviewPanel: View {
     let pageCount: Int
     let checking: Bool
     let refresh: () -> Void
+    let compare: () -> Void
     let close: () -> Void
     let reveal: (SlideReviewRow) -> Void
 
@@ -78,6 +79,8 @@ struct SlideReviewPanel: View {
                 Spacer()
                 if mode == .preflight {
                     Button("重新检查", action: refresh).disabled(checking)
+                } else {
+                    Button("对照原稿 PDF…", action: compare)
                 }
                 Button(action: close) { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary) }
                     .buttonStyle(.plain)

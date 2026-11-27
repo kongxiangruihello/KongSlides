@@ -57,6 +57,7 @@ struct EditorView: View {
     @State private var pendingDeletion: Set<UUID> = []
     @State private var notesFocus = false
     @State private var teachingSheet: TeachingSheet?
+    @State private var referencePDF: ReferenceFile?
     @ObservedObject private var templateStore = TeachingTemplateStore.shared
     @AppStorage("speakerNotesFontSize") private var notesFontSize = 16.0
     @State private var notesHeight = 108.0
@@ -161,6 +162,9 @@ struct EditorView: View {
         .sheet(isPresented: $notesFocus, onDismiss: { selectedPageIDs = [slide.id] }) {
             NotesFocusView(document: $document, slideID: $slideID, fontSize: $notesFontSize)
         }
+        .sheet(item: $referencePDF) { reference in
+            ReferencePDFView(url: reference.url, deck: deck, selectedSlide: slide.id, replace: replaceWithReference)
+        }
         .sheet(item: $teachingSheet) { sheet in
             switch sheet {
             case .outline:
@@ -230,6 +234,7 @@ struct EditorView: View {
                 Button("导入 PPTX 到当前课件…") { importPowerPoint(asNewDocument: false) }.disabled(importing)
                 Button("查看 PPTX 导入报告") { reviewMode = .imported }
                     .disabled(!deck.slides.contains { $0.importReport != nil })
+                Button("对照原稿 PDF…", action: chooseReferencePDF)
                 Divider()
                 Button("导出可编辑 PPTX…") { export(.powerPoint) }
                 Button("导出投影 PDF…") { export(.pdf) }
@@ -953,6 +958,34 @@ struct EditorView: View {
         }
     }
 
+    private func chooseReferencePDF() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.pdf]
+        panel.prompt = "对照"
+        if panel.runModal() == .OK, let url = panel.url { referencePDF = ReferenceFile(url: url) }
+    }
+
+    private func replaceWithReference(_ slideID: UUID, page: Int, url: URL) {
+        Task { @MainActor in
+            do {
+                let rendered = try await Task.detached(priority: .userInitiated) {
+                    guard let pdf = CGPDFDocument(url as CFURL) else { throw ReferencePDFError.unavailable }
+                    let image = try ReferencePDF.image(in: pdf, page: page)
+                    guard let data = PhotoStorage.png(image) else { throw ReferencePDFError.invalidPage }
+                    return (data, CGSize(width: image.width, height: image.height))
+                }.value
+                guard let index = deck.slides.firstIndex(where: { $0.id == slideID }) else { return }
+                var updated = deck
+                let asset = UUID()
+                updated.images[asset] = rendered.0
+                ReferencePDF.replace(&updated.slides[index], with: asset, size: rendered.1)
+                document.deck = try updated.validated()
+                search = ""
+                selectPages([slideID])
+            } catch { linkedError = error.localizedDescription }
+        }
+    }
+
     private func reviewPanel(_ mode: SlideReviewMode) -> some View {
         SlideReviewPanel(
             mode: mode,
@@ -960,6 +993,7 @@ struct EditorView: View {
             pageCount: mode == .imported ? deck.slides.filter { $0.importReport != nil }.count : preflightPageCount,
             checking: mode == .preflight && checkingPreflight,
             refresh: runPreflight,
+            compare: chooseReferencePDF,
             close: { reviewMode = nil },
             reveal: { row in
                 guard let target = deck.slides.first(where: { $0.id == row.slideID }) else { return }
@@ -1084,6 +1118,11 @@ struct EditorView: View {
             }
         } catch { linkedError = error.localizedDescription }
     }
+}
+
+private struct ReferenceFile: Identifiable {
+    var id: URL { url }
+    let url: URL
 }
 
 private enum TeachingSheet: String, Identifiable {

@@ -1,17 +1,23 @@
 import Foundation
 
 enum TeachingGenerator {
-    static func preview(_ draft: TeachingDraft, template: TeachingTemplate) -> Slide {
-        guard template.canGenerate else { return template.slide }
-        return populated(draft, title: draft.title, body: String(draft.projection.prefix(1600)),
-                         notes: draft.notes, template: template)
+    struct Layout {
+        let clipboard: SlideClipboard
+        let ranges: [UUID: Range<Int>]
     }
 
     static func generate(_ drafts: [TeachingDraft], template: TeachingTemplate) throws -> SlideClipboard {
+        try layout(drafts, template: template).clipboard
+    }
+
+    static func layout(_ drafts: [TeachingDraft], template: TeachingTemplate) throws -> Layout {
         guard template.canGenerate else { throw TeachingOutlineError.boxTooSmall(template.name) }
         guard !drafts.isEmpty else { throw TeachingOutlineError.noContent }
         var pages: [Slide] = []
+        var ranges: [UUID: Range<Int>] = [:]
         for draft in drafts {
+            try Task.checkCancellation()
+            let start = pages.count
             let title = draft.title.trimmingCharacters(in: .whitespacesAndNewlines)
             let safeTitle = title.isEmpty ? "未命名幻灯片" : title
             let bodySlot = template.slots[1]
@@ -20,7 +26,7 @@ enum TeachingGenerator {
             for (index, contents) in pieces.enumerated() {
                 let name = index == 0 ? safeTitle : "\(safeTitle)（续 \(index)）"
                 var slide = populated(draft, title: name, body: contents,
-                                      notes: index == 0 ? draft.notes : "", template: template)
+                                      notes: draft.notes(for: index + 1, pageCount: pieces.count), template: template)
                 let titleSlot = template.slots[0]
                 while SlideText.isClipped(slide.objects[titleSlot]), slide.objects[titleSlot].fontSize > 12 {
                     slide.objects[titleSlot].fontSize = max(12, slide.objects[titleSlot].fontSize - 2)
@@ -31,8 +37,9 @@ enum TeachingGenerator {
                 pages.append(slide)
                 guard pages.count <= 500 else { throw TeachingOutlineError.tooLarge }
             }
+            ranges[draft.id] = start..<pages.count
         }
-        return SlideClipboard(slides: pages, images: template.images)
+        return Layout(clipboard: SlideClipboard(slides: pages, images: template.images), ranges: ranges)
     }
 
     private static func populated(_ draft: TeachingDraft, title: String, body: String, notes: String,
@@ -58,6 +65,7 @@ enum TeachingGenerator {
         var pages: [String] = []
         var offset = 0
         while offset < characters.count {
+            try Task.checkCancellation()
             let end = min(characters.count, offset + 4096)
             if fits(characters[offset..<end]) {
                 pages.append(String(characters[offset..<end]))

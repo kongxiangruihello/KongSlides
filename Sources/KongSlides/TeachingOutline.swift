@@ -7,19 +7,26 @@ enum TeachingDestination: String, CaseIterable, Identifiable {
     var label: String { self == .projection ? "投影" : "讲稿" }
 }
 
-struct TeachingBlock: Identifiable {
+struct TeachingBlock: Identifiable, Equatable {
     var id = UUID()
     var text: String
     var destination: TeachingDestination
+    var notesPage = 1
 }
 
-struct TeachingDraft: Identifiable {
+struct TeachingDraft: Identifiable, Equatable {
     var id = UUID()
     var section: String
     var title: String
     var blocks: [TeachingBlock] = []
 
-    var notes: String { blocks.filter { $0.destination == .notes }.map(\.text).joined(separator: "\n\n") }
+    var notes: String { notes(for: 1, pageCount: 1) }
+
+    func notes(for page: Int, pageCount: Int) -> String {
+        blocks.filter {
+            $0.destination == .notes && min(max(1, $0.notesPage), pageCount) == page
+        }.map(\.text).joined(separator: "\n\n")
+    }
     var projection: String { blocks.filter { $0.destination == .projection }.map(\.text).joined(separator: "\n\n") }
 }
 
