@@ -77,12 +77,13 @@ click(awaitElement("编号") { located("编号") })
 print("Editor toolbar exposes Import, Export and Properties, and the numbering button was clicked on a text object.")
 key(53)
 key(1, flags: [.maskCommand, .maskShift])
-let picker = awaitElement("save format chooser") {
-    guard let front = sheet(), located("选择另存为格式", from: front) != nil else { return nil }
-    return front
-}
 let option = awaitElement("PowerPoint format button") {
-    located("PowerPoint 演示文稿（.pptx）", from: picker)
+    sheet().flatMap { current in
+        find(current) { item in
+            get(item, kAXRoleAttribute) as? String == kAXButtonRole &&
+                get(item, kAXTitleAttribute) as? String == "PowerPoint 演示文稿（.pptx）"
+        }
+    }
 }
 click(option)
 let dialog = awaitElement("PPTX Save As sheet after choosing a format") {
