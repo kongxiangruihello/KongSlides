@@ -103,7 +103,9 @@ struct EditorView: View {
     @AppStorage("showSpeakerNotes") private var showNotes = true
     @AppStorage("showLayoutInspector") private var showInspector = true
     @AppStorage("sidebarWidth") private var sidebarWidth = 206.0
+    @AppStorage("inspectorWidth") private var inspectorWidth = 230.0
     @GestureState private var sidebarDrag = 0.0
+    @GestureState private var inspectorDrag = 0.0
     @State private var search = ""
     @State private var presenter = PresentationController()
 
@@ -171,32 +173,7 @@ struct EditorView: View {
                 .padding(.horizontal, 16).padding(.vertical, 8)
             }
             Divider()
-            HStack(spacing: 0) {
-                sidebar.frame(width: (sidebarWidth + sidebarDrag).clamped(168...360))
-                Rectangle().fill(Color(nsColor: .separatorColor))
-                    .frame(width: 1)
-                    .padding(.horizontal, 3)
-                    .contentShape(Rectangle())
-                    .help("拖动调整缩略图栏宽度")
-                    .gesture(DragGesture(coordinateSpace: .global)
-                        .updating($sidebarDrag) { value, live, _ in live = value.translation.width }
-                        .onEnded { sidebarWidth = (sidebarWidth + $0.translation.width).clamped(168...360) })
-                VStack(spacing: 0) {
-                    workspace
-                    if showNotes {
-                        Divider()
-                        notes
-                    }
-                    if let reviewMode {
-                        Divider()
-                        reviewPanel(reviewMode)
-                    }
-                }
-                if showInspector {
-                    Divider()
-                    inspector.frame(width: 230)
-                }
-            }
+            editorPanels
         }
         .background(Color(nsColor: .windowBackgroundColor))
         .background(EditorKeyMonitor(handle: handleShortcut))
@@ -370,6 +347,40 @@ struct EditorView: View {
             Button("好", role: .cancel) { linkedError = nil; session.error = nil }
         } message: { Text(linkedError ?? session.error ?? "") }
 
+    }
+
+    private var editorPanels: some View {
+        GeometryReader { geometry in
+            let widths = EditorPanelWidths(windowWidth: geometry.size.width, preferredLeft: sidebarWidth,
+                                          preferredRight: showInspector ? inspectorWidth : nil)
+            HStack(spacing: 0) {
+                sidebar.frame(width: widths.width(.left, translation: sidebarDrag))
+                EditorPanelResizeHandle(title: "拖动调整缩略图栏宽度", identifier: "resize-slide-sidebar",
+                                        translation: $sidebarDrag) { offset in
+                    let width = widths.width(.left, translation: offset)
+                    if width != widths.left { sidebarWidth = width }
+                }
+                VStack(spacing: 0) {
+                    workspace
+                    if showNotes {
+                        Divider()
+                        notes
+                    }
+                    if let reviewMode {
+                        Divider()
+                        reviewPanel(reviewMode)
+                    }
+                }
+                if showInspector {
+                    EditorPanelResizeHandle(title: "拖动调整版面属性宽度", identifier: "resize-layout-inspector",
+                                            translation: $inspectorDrag) { offset in
+                        let width = widths.width(.right, translation: offset)
+                        if width != widths.right { inspectorWidth = width }
+                    }
+                    inspector.frame(width: widths.width(.right, translation: inspectorDrag))
+                }
+            }
+        }
     }
 
     private var controls: some View {

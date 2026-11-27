@@ -3,6 +3,24 @@ import XCTest
 @testable import KongSlides
 
 final class EditorWindowTests: XCTestCase {
+    func testPanelDragKeepsCanvasSpaceAndCollapsingInspectorDoesNotChangeStoredWidths() {
+        let regular = EditorPanelWidths(windowWidth: 1280, preferredLeft: 206, preferredRight: 230)
+        XCTAssertEqual(regular.width(.left, translation: 80), 286)
+        XCTAssertEqual(regular.width(.right, translation: -80), 310)
+        XCTAssertEqual(regular.width(.right, translation: 200), 210)
+
+        let narrow = EditorPanelWidths(windowWidth: 1040, preferredLeft: 360, preferredRight: 400)
+        XCTAssertLessThanOrEqual(narrow.left + narrow.right, 600.0001)
+        XCTAssertEqual(narrow.width(.left, translation: 200), narrow.left, accuracy: 0.0001)
+        XCTAssertGreaterThanOrEqual(narrow.right, 210)
+
+        let hidden = EditorPanelWidths(windowWidth: 1040, preferredLeft: 360, preferredRight: nil)
+        XCTAssertEqual(hidden.left, 360)
+        XCTAssertEqual(hidden.width(.right, translation: -100), 0)
+        let reopened = EditorPanelWidths(windowWidth: 1280, preferredLeft: 360, preferredRight: 400)
+        XCTAssertEqual(reopened.right, 400)
+    }
+
     @MainActor
     func testSaveAsPowerPointWritesEditableCopyAndPreservesNativeSession() async throws {
         _ = NSApplication.shared
