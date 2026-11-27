@@ -1,0 +1,107 @@
+name: Publish KongSlides v0.2.22
+
+on:
+  push:
+    branches: [release-v0.2.22]
+    paths: [.github/workflows/publish-v0.2.22.yml, Scripts/verify-v0.2.22-upgrade.sh, Scripts/verify-v0.2.22-mouse.swift]
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: kongslides-publish-v0.2.22
+  cancel-in-progress: true
+
+jobs:
+  desktop_smoke:
+    name: Test upgrades on a macOS desktop
+    runs-on: macos-15
+    timeout-minutes: 14
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      sha256: ${{ steps.candidate.outputs.sha256 }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      SOURCE_COMMIT: ae4db8ff9ae585c83f28099a7dd3e2ce31205ae6
+      BUILD_RUN: "46081664473"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download the tested build
+        shell: bash
+        id: candidate
+        run: |
+          gh run watch "$BUILD_RUN" --exit-status --interval 3
+          read -r head result <<< "$(gh run view "$BUILD_RUN" --json headSha,conclusion --jq '[.headSha,.conclusion] | @tsv')"
+          [[ "$head" == "$SOURCE_COMMIT" && "$result" == success ]]
+          gh run download "$BUILD_RUN" --name KongSlides-macOS-preview --dir candidate
+          echo "sha256=$(shasum -a 256 candidate/KongSlides-macOS-preview.zip | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+      - name: Launch, upgrade, relaunch and reopen an existing deck
+        run: bash Scripts/verify-v0.2.22-upgrade.sh candidate/KongSlides-macOS-preview.zip
+
+  release:
+    needs: desktop_smoke
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      SOURCE_COMMIT: ae4db8ff9ae585c83f28099a7dd3e2ce31205ae6
+      BUILD_RUN: "46081664473"
+      EDITOR_RUN: "46081723593"
+      EXPECTED_SHA256: ${{ needs.desktop_smoke.outputs.sha256 }}
+    steps:
+      - name: Wait for editing and PowerPoint desktop verification
+        run: gh run watch "$EDITOR_RUN" --exit-status --interval 4
+      - name: Verify the macOS build and prepare assets
+        shell: bash
+        run: |
+          read -r head result <<< "$(gh run view "$BUILD_RUN" --json headSha,conclusion --jq '[.headSha,.conclusion] | @tsv')"
+          [[ "$head" == "$SOURCE_COMMIT" && "$result" == success ]]
+          gh run download "$BUILD_RUN" --name KongSlides-macOS-preview --dir publish
+          cd publish
+          mv KongSlides-macOS-preview.zip KongSlides-0.2.22-macOS-preview.zip
+          printf '%s  %s\n' "$EXPECTED_SHA256" KongSlides-0.2.22-macOS-preview.zip > SHA256SUMS
+          sha256sum --check SHA256SUMS
+          unzip -tq KongSlides-0.2.22-macOS-preview.zip
+      - name: Publish the preview release
+        shell: bash
+        run: |
+          cat > publish/notes.md <<'EOF'
+          - 长课件编辑：查找替换、按条件筛选、多页批量样式、所选页导出、拖页自动滚动和移至章节、两套 94 页性能基准。
+          - 画布与工具：参考线和等距吸附、文字溢出处理、格式刷、工具栏排序、编辑布局切换、对象重命名／分层／临时隐藏。
+          - 文件与恢复：PPTX 回读核对、教室兼容副本、PDF 修复可局部撤回、自动页码和页脚、快照并排比对及部分恢复、保存与导出反馈。
+          - 备课与课堂：多套放映顺序、教师屏预览后跳页、讲稿逐段跟读、白屏与讨论倒计时、课后回顾和续讲位置、学生 PDF 预览及教师内容过滤。
+
+          安装包适用于 **Apple 芯片、macOS 15 或更新版本**。可从应用内「检查更新…」安装。
+          EOF
+          cat >> publish/notes.md <<'EOF'
+
+          ### 94 页性能基准
+          测量使用合成文字课件和含 24 张图像素材的合成课件。首帧数值包含磁盘读取和一次页面渲染。
+          | 94 页样本 | 读取及首帧 | 连续渲染 30 页 | 原生保存 | 另存 PPTX |
+          | --- | ---: | ---: | ---: | ---: |
+          | 纯文字 | 26 ms | 416 ms | 3 ms | 196 ms |
+          | 含图片 | 24 ms | 461 ms | 14 ms | 166 ms |
+          EOF
+          if ! gh release view v0.2.22 --json isDraft >/dev/null 2>&1; then
+            gh release create v0.2.22 --target "$SOURCE_COMMIT" --title 'KongSlides 0.2.22 教学预览版' \
+              --draft --prerelease --notes-file publish/notes.md
+          fi
+
+          for asset in KongSlides-0.2.22-macOS-preview.zip SHA256SUMS; do
+            remote_digest="$(gh api "repos/$GH_REPO/releases" --jq ".[] | select(.tag_name == \"v0.2.22\") | .assets[] | select(.name == \"$asset\") | .digest")"
+            if [[ -z "$remote_digest" ]]; then
+              [[ "$(gh release view v0.2.22 --json isDraft --jq .isDraft)" == true ]]
+              gh release upload v0.2.22 "publish/$asset"
+              remote_digest="$(gh api "repos/$GH_REPO/releases" --jq ".[] | select(.tag_name == \"v0.2.22\") | .assets[] | select(.name == \"$asset\") | .digest")"
+            fi
+            local_digest="sha256:$(sha256sum "publish/$asset" | cut -d ' ' -f 1)"
+            [[ "$remote_digest" == "$local_digest" ]]
+          done
+
+          gh release edit v0.2.22 --draft=false --prerelease --latest=false
+          [[ "$(gh api "repos/$GH_REPO/commits/v0.2.22" --jq .sha)" == "$SOURCE_COMMIT" ]]
+          gh release view v0.2.22 --json url,isDraft,isPrerelease,assets --jq '{url,isDraft,isPrerelease,assets:[.assets[] | .name]}'
