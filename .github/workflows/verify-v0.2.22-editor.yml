@@ -1,0 +1,58 @@
+name: KongSlides 0.2.22 classroom desktop verification
+on:
+  push:
+    branches: [codex/kongslides-0.2.22-desktop]
+    paths: [.github/workflows/verify-v0.2.22-editor.yml, Scripts/verify-v0.2.22-editor.swift]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  editor:
+    runs-on: macos-15
+    timeout-minutes: 12
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      BUILD_RUN: "46081664473"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download the verified build
+        run: |
+          gh run watch "$BUILD_RUN" --exit-status --interval 4
+          gh run download "$BUILD_RUN" --name KongSlides-macOS-preview --dir candidate
+          ditto -x -k candidate/KongSlides-macOS-preview.zip candidate
+      - name: Edit text and save an editable PowerPoint on the macOS desktop
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="$(mktemp -d)"
+          app="$PWD/candidate/KongSlides.app"
+          defaults write com.kongslides.app checkForUpdatesAutomatically -bool false
+          cat > "$root/Classroom.kongslides" <<'JSON'
+          {"schemaVersion":1,"slides":[{"id":"4BF6459E-819C-440E-A535-29DE239F51B1","section":"Old Unit","background":"F8F5EE","speakerNotes":"Old notes","objects":[{"id":"29CFF66B-7C33-45ED-AAD1-F8962EF20CBA","kind":"text","x":72,"y":84,"width":720,"height":90,"text":"Old lesson","fontSize":36,"bold":false,"color":"23253A"}]}],"images":[]}
+          JSON
+          swiftc Scripts/verify-v0.2.22-editor.swift -o "$root/editor-test"
+          open -n -a "$app" "$root/Classroom.kongslides"
+          pid=""
+          for _ in {1..20}; do
+            pid="$(pgrep -nf "$app/Contents/MacOS/KongSlides" || true)"
+            [[ -n "$pid" ]] && break
+            sleep 1
+          done
+          [[ -n "$pid" ]]
+          "$root/editor-test" "$pid"
+          for _ in {1..20}; do
+            [[ -s "$root/Classroom.pptx" ]] && break
+            sleep 1
+          done
+          python3 - "$root" <<'PY'
+          import json, pathlib, sys, zipfile
+          folder = pathlib.Path(sys.argv[1])
+          with (folder / "Classroom.kongslides").open() as src:
+              page = json.load(src)["slides"][0]
+          assert (page["section"], page["speakerNotes"], page["objects"][0]["text"]) == ("New Unit","New notes","New lesson"), page
+          with zipfile.ZipFile(folder / "Classroom.pptx") as pptx:
+              assert b"New lesson" in pptx.read("ppt/slides/slide1.xml")
+              assert b"New notes" in pptx.read("ppt/notesSlides/notesSlide1.xml")
+          print("Verified the replacement in the native file and the editable PPTX.")
+          PY
