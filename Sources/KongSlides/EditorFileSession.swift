@@ -116,6 +116,7 @@ final class EditorFileSession {
 
     @discardableResult
     func save(asCopy: Bool = false) -> Bool {
+        guard endTextEditing() else { return false }
         let destination: URL
         if let fileURL, !asCopy {
             destination = fileURL
@@ -144,10 +145,13 @@ final class EditorFileSession {
         }
     }
 
+    private func endTextEditing() -> Bool {
+        guard let window = NSApp.keyWindow, window.firstResponder is NSTextView else { return true }
+        return window.makeFirstResponder(nil)
+    }
+
     func confirmReplacement() -> Bool {
-        if let window = NSApp.keyWindow, window.firstResponder is NSTextView {
-            guard window.makeFirstResponder(nil) else { return false }
-        }
+        guard endTextEditing() else { return false }
         guard isEdited else { return true }
         let alert = NSAlert()
         alert.messageText = "要保存对「\(name)」的修改吗？"
