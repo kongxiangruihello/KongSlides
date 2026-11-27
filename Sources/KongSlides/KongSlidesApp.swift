@@ -40,6 +40,7 @@ struct SlideSurface: View {
 struct EditorView: View {
     @Binding var document: SlidesDocument
     let session: EditorFileSession
+    let documentIdentity: UUID
     @State private var slideID: UUID?
     @State private var selectedPageIDs: Set<UUID> = []
     @State private var pageSelectionAnchor: UUID?
@@ -126,6 +127,13 @@ struct EditorView: View {
         .background(Color(nsColor: .windowBackgroundColor))
         .background(EditorKeyMonitor(handle: handleShortcut))
         .onAppear {
+            if slideID == nil, session.identity == documentIdentity,
+               let page = session.activePageID, deck.slides.contains(where: { $0.id == page }) {
+                slideID = page
+                selectedPageIDs = [page]
+                pageSelectionAnchor = page
+                if deck.slides.first?.id != page { pageToReveal = page }
+            }
             if deck.importedTitle != nil && deck.slides.contains(where: { $0.importReport != nil }) {
                 reviewMode = .imported
             }
@@ -219,6 +227,7 @@ struct EditorView: View {
             Button("取消", role: .cancel) { pendingDeletion = [] }
         } message: { Text("所选页面及其讲稿会一起移除。") }
         .onChange(of: slide.id) {
+            session.rememberPage(slide.id, for: documentIdentity)
             if selection == nil { objectID = nil }
             editingID = nil
         }
@@ -1007,6 +1016,7 @@ struct EditorView: View {
         selectedPageIDs = selection.selected
         pageSelectionAnchor = selection.anchor
         slideID = selection.current
+        session.rememberPage(selection.current, for: documentIdentity)
         objectID = nil
         editingID = nil
         pageCommands = true

@@ -7,6 +7,7 @@ final class EditorFileSession {
     private(set) var document = SlidesDocument()
     private(set) var fileURL: URL?
     private(set) var identity = UUID()
+    private(set) var activePageID: UUID?
     private(set) var opening = false
     private(set) var progress = ImportProgress()
     var error: String?
@@ -18,7 +19,19 @@ final class EditorFileSession {
     @ObservationIgnored private var reader: Task<Deck, Error>?
     @ObservationIgnored private var operation: UUID?
 
-    init() { savedDeck = document.deck }
+    @ObservationIgnored private let positions: RecentSlidePositions
+
+    init(positions: RecentSlidePositions = .init()) {
+        self.positions = positions
+        savedDeck = document.deck
+        activePageID = document.deck.slides.first?.id
+    }
+
+    func rememberPage(_ page: UUID, for editor: UUID) {
+        guard editor == identity, document.deck.slides.contains(where: { $0.id == page }) else { return }
+        activePageID = page
+        if let fileURL { positions.remember(page, for: fileURL) }
+    }
 
     var name: String {
         fileURL?.deletingPathExtension().lastPathComponent ?? document.deck.importedTitle ?? "未命名课件"
@@ -109,6 +122,8 @@ final class EditorFileSession {
         undoManager.removeAllActions()
         document = SlidesDocument(deck: deck)
         fileURL = url
+        let remembered = url.flatMap { positions.page(for: $0) }
+        activePageID = deck.slides.first(where: { $0.id == remembered })?.id ?? deck.slides.first?.id
         savedDeck = markEdited ? nil : deck
         error = nil
         identity = UUID()
@@ -136,6 +151,9 @@ final class EditorFileSession {
             try document.writeNative(to: destination)
             fileURL = destination
             savedDeck = document.deck
+            if let page = activePageID, document.deck.slides.contains(where: { $0.id == page }) {
+                positions.remember(page, for: destination)
+            }
             self.error = nil
             statusChanged?()
             NSDocumentController.shared.noteNewRecentDocumentURL(destination)

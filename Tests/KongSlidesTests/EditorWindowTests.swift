@@ -65,6 +65,49 @@ final class EditorWindowTests: XCTestCase {
     }
 
     @MainActor
+    func testReopenRestoresSavedSlideByIDAndIgnoresStaleEditorEvents() async throws {
+        _ = NSApplication.shared
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let suite = "kongslides-tests-\(UUID())"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let positions = RecentSlidePositions(defaults: defaults)
+        let first = Slide.titleSlide("第一课", subtitle: "")
+        let second = Slide.titleSlide("第二课", subtitle: "")
+        let third = Slide.titleSlide("第三课", subtitle: "")
+        let file = directory.appendingPathComponent("课件.kongslides")
+        let other = directory.appendingPathComponent("另一份课件.kongslides")
+        try SlidesDocument(deck: Deck(slides: [first, second])).writeNative(to: file)
+        try SlidesDocument(deck: Deck(slides: [third, first])).writeNative(to: other)
+
+        let session = EditorFileSession(positions: positions)
+        session.open(file)
+        try await finishOpening(session)
+        let previous = session.identity
+        session.rememberPage(second.id, for: previous)
+        XCTAssertFalse(session.isEdited)
+        session.open(other)
+        try await finishOpening(session)
+        session.rememberPage(first.id, for: previous)
+        XCTAssertEqual(session.activePageID, third.id)
+        XCTAssertNil(positions.page(for: other))
+        XCTAssertEqual(positions.page(for: file), second.id)
+
+        try SlidesDocument(deck: Deck(slides: [third, second, first])).writeNative(to: file)
+        let reopened = EditorFileSession(positions: RecentSlidePositions(defaults: defaults))
+        reopened.open(file)
+        try await finishOpening(reopened)
+        XCTAssertEqual(reopened.activePageID, second.id)
+
+        try SlidesDocument(deck: Deck(slides: [first, third])).writeNative(to: file)
+        session.open(file)
+        try await finishOpening(session)
+        XCTAssertEqual(session.activePageID, first.id)
+    }
+
+    @MainActor
     private func finishOpening(_ session: EditorFileSession) async throws {
         for _ in 0..<400 where session.opening {
             try await Task.sleep(for: .milliseconds(25))

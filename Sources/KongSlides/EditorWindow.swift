@@ -179,7 +179,7 @@ private struct EditorWindowContent: View {
             get: { session.identity == identity ? session.document : snapshot },
             set: { if session.identity == identity { session.edit($0) } }
         )
-        EditorView(document: document, session: session)
+        EditorView(document: document, session: session, documentIdentity: identity)
             .id(identity)
             .frame(minWidth: 1040, minHeight: 660)
             .tint(Color(nsColor: Palette.color(Palette.indigo)))
