@@ -13,7 +13,7 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
-      BUILD_RUN: "46078364022"
+      BUILD_RUN: "46079076160"
     steps:
       - uses: actions/checkout@v4
       - name: Download the tested candidate

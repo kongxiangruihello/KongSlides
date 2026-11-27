@@ -72,6 +72,17 @@ func move(_ identifier: String, by offset: CGFloat) -> CGFloat {
     return final.midX
 }
 
+let appWindow = until("Missing editor window") {
+    (attribute(app, kAXWindowsAttribute) as? [AXUIElement])?.first
+}
+let display = CGDisplayBounds(CGMainDisplayID())
+print("Desktop display bounds:", display)
+var origin = CGPoint(x: display.minX + 15, y: display.minY + 30)
+if let position = AXValueCreate(.cgPoint, &origin) {
+    print("Positioned test window on the main display:",
+          AXUIElementSetAttributeValue(appWindow, kAXPositionAttribute as CFString, position).rawValue)
+}
+Thread.sleep(forTimeInterval: 0.5)
 move("resize-slide-sidebar", by: 75)
 move("resize-layout-inspector", by: -65)
 move("resize-slide-sidebar", by: -30)
