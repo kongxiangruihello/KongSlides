@@ -2,6 +2,33 @@ import AppKit
 import Observation
 import UniformTypeIdentifiers
 
+struct NativeDocumentStamp: Equatable, Sendable {
+    let modified: Date
+    let size: UInt64
+    let inode: UInt64
+
+    init?(at url: URL) {
+        guard let info = try? FileManager.default.attributesOfItem(atPath: url.resolvingSymlinksInPath().path),
+              let modified = info[.modificationDate] as? Date,
+              let size = (info[.size] as? NSNumber)?.uint64Value,
+              let inode = (info[.systemFileNumber] as? NSNumber)?.uint64Value else { return nil }
+        self.modified = modified
+        self.size = size
+        self.inode = inode
+    }
+}
+
+private struct OpenedDeck {
+    let deck: Deck
+    var stamp: NativeDocumentStamp? = nil
+}
+
+private enum NativeDocumentChanged: LocalizedError {
+    case externalModification
+
+    var errorDescription: String? { "文件已被其他应用或同步服务修改。请重新打开，或把当前课件另存为副本。" }
+}
+
 @MainActor @Observable
 final class EditorFileSession {
     private(set) var document = SlidesDocument()
@@ -16,8 +43,9 @@ final class EditorFileSession {
     @ObservationIgnored let undoManager = UndoManager()
     @ObservationIgnored var statusChanged: (() -> Void)?
     @ObservationIgnored private var savedDeck: Deck?
-    @ObservationIgnored private var reader: Task<Deck, Error>?
+    @ObservationIgnored private var reader: Task<OpenedDeck, Error>?
     @ObservationIgnored private var operation: UUID?
+    @ObservationIgnored private var savedStamp: NativeDocumentStamp?
 
     @ObservationIgnored private let positions: RecentSlidePositions
 
@@ -55,9 +83,9 @@ final class EditorFileSession {
         if panel.runModal() == .OK, let url = panel.url { open(url) }
     }
 
-    func open(_ url: URL) {
+    func open(_ url: URL, discardEditsToReload: Bool = false) {
         guard url.isFileURL, ["kongslides", "pptx", "ppt"].contains(url.pathExtension.lowercased()),
-              url.standardizedFileURL != fileURL?.standardizedFileURL else { return }
+              discardEditsToReload || url.standardizedFileURL != fileURL?.standardizedFileURL else { return }
         cancelOpening()
         let request = UUID()
         operation = request
@@ -69,24 +97,28 @@ final class EditorFileSession {
             let access = url.startAccessingSecurityScopedResource()
             defer { if access { url.stopAccessingSecurityScopedResource() } }
             if url.pathExtension.lowercased() == "kongslides" {
-                return try SlidesDocument.readNative(url).deck
+                let stamp = NativeDocumentStamp(at: url)
+                let opened = try SlidesDocument.readNative(url)
+                guard stamp == NativeDocumentStamp(at: url) else { throw NativeDocumentChanged.externalModification }
+                return OpenedDeck(deck: opened.deck, stamp: stamp)
             }
-            return try PowerPoint.readForEditor(url) { completed, total in
+            let imported = try PowerPoint.readForEditor(url) { completed, total in
                 Task { @MainActor in
                     progress.completed = max(progress.completed, completed)
                     progress.total = total
                 }
-            }.deck
+            }
+            return OpenedDeck(deck: imported.deck)
         }
         reader = work
         Task {
             defer { if operation == request { cancelOpening() } }
             do {
-                let deck = try await work.value
+                let opened = try await work.value
                 guard operation == request, !work.isCancelled else { return }
                 let destination = url.pathExtension.lowercased() == "kongslides" ? url : nil
-                guard confirmReplacement(), operation == request, !work.isCancelled else { return }
-                install(deck, at: destination, markEdited: false)
+                guard (discardEditsToReload || confirmReplacement()), operation == request, !work.isCancelled else { return }
+                install(opened.deck, at: destination, markEdited: false, stamp: opened.stamp)
                 NSDocumentController.shared.noteNewRecentDocumentURL(url)
             } catch {
                 guard operation == request, !work.isCancelled else { return }
@@ -118,10 +150,11 @@ final class EditorFileSession {
         install(Deck(), at: nil, markEdited: false)
     }
 
-    private func install(_ deck: Deck, at url: URL?, markEdited: Bool) {
+    private func install(_ deck: Deck, at url: URL?, markEdited: Bool, stamp: NativeDocumentStamp? = nil) {
         undoManager.removeAllActions()
         document = SlidesDocument(deck: deck)
         fileURL = url
+        savedStamp = stamp ?? url.flatMap { NativeDocumentStamp(at: $0) }
         let remembered = url.flatMap { positions.page(for: $0) }
         activePageID = deck.slides.first(where: { $0.id == remembered })?.id ?? deck.slides.first?.id
         savedDeck = markEdited ? nil : deck
@@ -148,7 +181,13 @@ final class EditorFileSession {
         do {
             let scoped = destination.startAccessingSecurityScopedResource()
             defer { if scoped { destination.stopAccessingSecurityScopedResource() } }
+            if fileURL?.resolvingSymlinksInPath().standardizedFileURL == destination.resolvingSymlinksInPath().standardizedFileURL,
+               savedStamp != NativeDocumentStamp(at: destination) {
+                if asCopy { throw NativeDocumentChanged.externalModification }
+                return resolveSaveConflict(destination)
+            }
             try document.writeNative(to: destination)
+            savedStamp = NativeDocumentStamp(at: destination)
             fileURL = destination
             savedDeck = document.deck
             if let page = activePageID, document.deck.slides.contains(where: { $0.id == page }) {
@@ -161,6 +200,20 @@ final class EditorFileSession {
         } catch {
             self.error = "无法保存「\(destination.lastPathComponent)」。\n\(error.localizedDescription)"
             return false
+        }
+    }
+
+    private func resolveSaveConflict(_ url: URL) -> Bool {
+        let alert = NSAlert()
+        alert.messageText = "磁盘上的课件已有变化"
+        alert.informativeText = "可以把当前修改另存为副本，也可以放弃当前修改并重新载入磁盘版本。"
+        alert.addButton(withTitle: "另存为…")
+        alert.addButton(withTitle: "取消").keyEquivalent = "\u{1b}"
+        alert.addButton(withTitle: "放弃修改并重新载入")
+        switch alert.runModal() {
+        case .alertFirstButtonReturn: return save(asCopy: true)
+        case .alertThirdButtonReturn: open(url, discardEditsToReload: true); return false
+        default: return false
         }
     }
 

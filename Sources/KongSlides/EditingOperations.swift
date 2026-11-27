@@ -158,3 +158,38 @@ enum SlidePageNumber {
         return page
     }
 }
+
+struct SlideVisitHistory {
+    private var back: [UUID] = []
+    private var forward: [UUID] = []
+
+    mutating func visit(from current: UUID, to target: UUID) {
+        guard current != target else { return }
+        Self.push(current, onto: &back)
+        forward.removeAll()
+    }
+
+    mutating func step(from current: UUID, backward: Bool, available: Set<UUID>) -> UUID? {
+        if backward {
+            while let page = back.popLast() {
+                if page != current && available.contains(page) {
+                    Self.push(current, onto: &forward)
+                    return page
+                }
+            }
+        } else {
+            while let page = forward.popLast() {
+                if page != current && available.contains(page) {
+                    Self.push(current, onto: &back)
+                    return page
+                }
+            }
+        }
+        return nil
+    }
+
+    private static func push(_ page: UUID, onto stack: inout [UUID]) {
+        if stack.last != page { stack.append(page) }
+        if stack.count > 100 { stack.removeFirst(stack.count - 100) }
+    }
+}

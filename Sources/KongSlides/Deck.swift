@@ -66,6 +66,11 @@ enum SlideDrawing {
                 if let table = object.table { drawTable(table, in: rect, context: context) }
             }
         }
+        if let citation = slide.citation, !citation.reference.isEmpty {
+            let text = SlideObject(text: String(citation.reference.prefix(130)), fontSize: 12)
+            let inset = min(16.0, canvas.width / 8)
+            drawText(text, in: CGRect(x: inset, y: 2, width: canvas.width - inset * 2, height: 23), context: context)
+        }
     }
 
     private static func drawConnector(_ line: SlideConnector, object: SlideObject, canvasHeight: CGFloat, context: CGContext) {

@@ -80,7 +80,9 @@ enum TeachingPDF {
     private static func teacher(_ deck: Deck, in context: CGContext) throws {
         var pages = 0
         for (index, slide) in deck.slides.enumerated() {
-            let notesString = slide.speakerNotes.isEmpty ? "本页暂无讲稿" : slide.speakerNotes
+            let body = slide.speakerNotes.isEmpty ? "本页暂无讲稿" : slide.speakerNotes
+            let notesString = [(slide.teachingCue.map { "【\($0.rawValue)】" } ?? ""), body,
+                               slide.citation?.handoutText ?? ""].filter { !$0.isEmpty }.joined(separator: "\n")
             let paragraph = NSMutableParagraphStyle()
             paragraph.lineSpacing = 4
             paragraph.paragraphSpacing = 5
@@ -145,8 +147,22 @@ enum TeachingPDF {
                 thumbnail(page.element, images: images, in: CGRect(x: margin, y: bottom, width: width, height: height),
                           canvas: canvas, context: context)
                 let left = margin + width + 18
-                label("课堂笔记", at: CGPoint(x: left, y: top - 14), fontSize: 11, bold: true, in: context)
-                for row in 1...7 {
+                let citation = page.element.citation?.handoutText ?? ""
+                if !citation.isEmpty {
+                    let text = NSMutableParagraphStyle()
+                    text.lineSpacing = 2
+                    let formatted = NSAttributedString(string: citation, attributes: [
+                        .font: NSFont.systemFont(ofSize: 9), .foregroundColor: bodyColor, .paragraphStyle: text
+                    ])
+                    let area = CGRect(x: left, y: top - 115, width: paper.width - margin - left, height: 94)
+                    let framesetter = CTFramesetterCreateWithAttributedString(formatted as CFAttributedString)
+                    let frame = CTFramesetterCreateFrame(framesetter, CFRange(location: 0, length: 0),
+                                                         CGPath(rect: area, transform: nil), nil)
+                    drawNotes(frame, inside: area, in: context)
+                }
+                label(citation.isEmpty ? "课堂笔记" : "史料与出处", at: CGPoint(x: left, y: top - 14),
+                      fontSize: 11, bold: true, in: context)
+                for row in (citation.isEmpty ? 1 : 5)...7 {
                     let y = top - 28 - Double(row) * 21
                     line(from: CGPoint(x: left, y: y), to: CGPoint(x: paper.width - margin, y: y), in: context)
                 }

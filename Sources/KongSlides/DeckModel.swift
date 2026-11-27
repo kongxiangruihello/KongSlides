@@ -157,6 +157,9 @@ struct SlideObject: Codable, Identifiable, Equatable {
     var table: SlideTable?
     var connector: SlideConnector?
     var decorationSource: DecorationSource?
+    var locked: Bool?
+
+    var isLocked: Bool { locked == true }
 
     var frame: CGRect { CGRect(x: x, y: y, width: width, height: height) }
 
@@ -197,11 +200,36 @@ struct SlideObject: Codable, Identifiable, Equatable {
     }
 }
 
+struct SlideCitation: Codable, Equatable {
+    var quotation = ""
+    var commentary = ""
+    var source = ""
+    var location = ""
+
+    var reference: String {
+        [source, location].map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }.joined(separator: "，")
+    }
+
+    var handoutText: String {
+        [("原文", quotation), ("注释", commentary), ("出处", reference)]
+            .filter { !$0.1.isEmpty }.map { $0.0 + "　" + $0.1 }.joined(separator: "\n")
+    }
+}
+
 struct Slide: Codable, Identifiable, Equatable {
+    enum TeachingCue: String, Codable, CaseIterable, Identifiable {
+        case essential = "必讲", optional = "可略", question = "提问", transition = "转场"
+        var id: Self { self }
+    }
+
     var id = UUID()
     var section = ""
     var background = Palette.paper
     var speakerNotes = ""
+    var teachingCue: TeachingCue?
+    var bookmarked: Bool?
+    var citation: SlideCitation?
     var objects: [SlideObject] = []
     var importReport: SlideImportReport?
     var hiddenInShow: Bool?

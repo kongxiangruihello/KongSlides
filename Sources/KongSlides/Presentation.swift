@@ -71,6 +71,15 @@ final class PresentationController: NSObject, ObservableObject, NSWindowDelegate
         return true
     }
 
+    var bookmarkedIndices: [Int] { deck.slides.indices.filter { deck.slides[$0].bookmarked == true } }
+
+    func visitBookmark(at position: Int) {
+        guard bookmarkedIndices.contains(position), index != position else { return }
+        let previous = regularReturnIndex ?? index
+        go(to: position)
+        regularReturnIndex = previous
+    }
+
     var backupIndices: [Int] { deck.slides.indices.filter { deck.slides[$0].isBackup } }
 
     func sequentialIndex(_ step: Int) -> Int? {
@@ -286,6 +295,9 @@ private struct PresenterView: View {
             Divider()
             Text("逐字讲稿").font(.headline)
             ScrollView {
+                if let cue = slide.teachingCue {
+                    Text(cue.rawValue).font(.headline).foregroundStyle(Color.accentColor)
+                }
                 Text(slide.speakerNotes.isEmpty ? "本页暂无讲稿" : slide.speakerNotes)
                     .font(.system(size: 21))
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -307,15 +319,22 @@ private struct BackupPageMenu: View {
     @ObservedObject var session: PresentationController
 
     var body: some View {
+        if !session.bookmarkedIndices.isEmpty {
+            Menu("课堂书签") {
+                ForEach(session.bookmarkedIndices, id: \.self) { index in
+                    Button("第 \(index + 1) 页 · \(session.deck.slides[index].title)") { session.visitBookmark(at: index) }
+                }
+            }
+        }
         if !session.backupIndices.isEmpty {
             Menu("备用页") {
                 ForEach(session.backupIndices, id: \.self) { index in
                     Button("第 \(index + 1) 页 · \(session.deck.slides[index].title)") { session.go(to: index) }
                 }
             }
-            if session.regularReturnIndex != nil {
-                Button("返回正片", action: session.returnToRegularSlide).help("按 R 返回调出备用页前的位置")
-            }
+        }
+        if session.regularReturnIndex != nil {
+            Button("返回讲授页", action: session.returnToRegularSlide).help("按 R 返回临时跳转前的位置")
         }
     }
 }

@@ -70,3 +70,83 @@ struct SlideTable: Codable, Equatable {
         }
     }
 }
+
+extension SlideTable {
+    enum Axis { case row, column }
+
+    mutating func appendTrack(_ axis: Axis) {
+        guard occupancy?.count ?? 0 > 0 else { return }
+        switch axis {
+        case .row:
+            guard rows.count < Self.maximumCells / columns.count else { return }
+            cells += columns.indices.map { Cell(row: rows.count, column: $0) }
+            rows.append(rows.last ?? 1)
+        case .column:
+            guard columns.count < Self.maximumCells / rows.count else { return }
+            cells += rows.indices.map { Cell(row: $0, column: columns.count) }
+            columns.append(columns.last ?? 1)
+        }
+        sortCells()
+    }
+
+    mutating func removeTrack(_ axis: Axis, at index: Int) {
+        let coordinate: WritableKeyPath<Cell, Int> = axis == .row ? \.row : \.column
+        let span: WritableKeyPath<Cell, Int> = axis == .row ? \.rowSpan : \.columnSpan
+        let tracks: WritableKeyPath<SlideTable, [Double]> = axis == .row ? \.rows : \.columns
+        guard self[keyPath: tracks].indices.contains(index), self[keyPath: tracks].count > 1 else { return }
+        self[keyPath: tracks].remove(at: index)
+        cells = cells.compactMap { cell in
+            var updated = cell
+            let start = cell[keyPath: coordinate]
+            let length = cell[keyPath: span]
+            if start > index { updated[keyPath: coordinate] -= 1 }
+            if start <= index && index < start + length {
+                guard length > 1 else { return nil }
+                updated[keyPath: span] -= 1
+            }
+            return updated
+        }
+        sortCells()
+    }
+
+    mutating func mergeCell(_ id: String, along axis: Axis) {
+        guard let index = cells.firstIndex(where: { $0.id == id }) else { return }
+        let cell = cells[index]
+        let neighbor = cells.firstIndex {
+            switch axis {
+            case .row:
+                return $0.row == cell.row + cell.rowSpan && $0.column == cell.column && $0.columnSpan == cell.columnSpan
+            case .column:
+                return $0.column == cell.column + cell.columnSpan && $0.row == cell.row && $0.rowSpan == cell.rowSpan
+            }
+        }
+        guard let neighbor else { return }
+        let next = cells[neighbor]
+        switch axis {
+        case .row: cells[index].rowSpan += next.rowSpan
+        case .column: cells[index].columnSpan += next.columnSpan
+        }
+        if !next.text.isEmpty {
+            let combined = [cell.text, next.text].filter { !$0.isEmpty }.joined(separator: "\n")
+            cells[index].replaceText(with: combined)
+        }
+        cells.remove(at: neighbor)
+    }
+
+    mutating func splitCell(_ id: String) {
+        guard let index = cells.firstIndex(where: { $0.id == id }) else { return }
+        let cell = cells[index]
+        for row in cell.row..<(cell.row + cell.rowSpan) {
+            for column in cell.column..<(cell.column + cell.columnSpan) where row != cell.row || column != cell.column {
+                cells.append(Cell(row: row, column: column, fill: cell.fill))
+            }
+        }
+        cells[index].rowSpan = 1
+        cells[index].columnSpan = 1
+        sortCells()
+    }
+
+    private mutating func sortCells() {
+        cells.sort { ($0.row, $0.column) < ($1.row, $1.column) }
+    }
+}

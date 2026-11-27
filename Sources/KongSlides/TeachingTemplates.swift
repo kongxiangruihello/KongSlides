@@ -14,6 +14,9 @@ struct TeachingTemplate: Codable, Identifiable {
         self.slide = slide
         self.slide.section = ""
         self.slide.speakerNotes = ""
+        self.slide.teachingCue = nil
+        self.slide.bookmarked = nil
+        self.slide.citation = nil
         self.slide.importReport = nil
         self.slide.hiddenInShow = nil
         self.images = SlideClipboard(slides: [slide], images: images).images
@@ -45,7 +48,25 @@ struct TeachingTemplate: Codable, Identifiable {
         SlideObject(x: 77, y: 161, width: 806, height: 300, text: "原文与要点", fontSize: 32)
     ]))
 
-    static let builtIns = [classroom, classic]
+    private static let seminar = TeachingTemplate(name: "思想史专题", slide: Slide(
+        background: "F8F5EE", objects: [
+            SlideObject(x: 56, y: 44, width: 848, height: 86, text: "专题标题", fontSize: 42, bold: true),
+            SlideObject(x: 56, y: 155, width: 400, height: 140, text: "人物与年代", fontSize: 27, bold: true),
+            SlideObject(x: 495, y: 155, width: 409, height: 140, text: "核心论点", fontSize: 27, bold: true),
+            SlideObject(x: 56, y: 320, width: 848, height: 170, text: "关键史料与讨论", fontSize: 26)
+        ]
+    ))
+
+    private static let analects = TeachingTemplate(name: "《论语》原文、训诂、讨论", slide: Slide(
+        background: "F1F4FB", objects: [
+            SlideObject(x: 56, y: 44, width: 848, height: 86, text: "《论语》篇章", fontSize: 42, bold: true),
+            SlideObject(x: 48, y: 153, width: 276, height: 340, text: "原文", fontSize: 26, bold: true),
+            SlideObject(x: 342, y: 153, width: 276, height: 340, text: "训诂", fontSize: 26, bold: true),
+            SlideObject(x: 636, y: 153, width: 276, height: 340, text: "争议与讨论", fontSize: 26, bold: true)
+        ]
+    ))
+
+    static let builtIns = [classroom, classic, analects, seminar]
 }
 
 @MainActor

@@ -3,6 +3,24 @@ import XCTest
 @testable import KongSlides
 
 final class PowerPointTableTests: XCTestCase {
+    func testRestructuringTablePreservesMergeCoverageAndText() {
+        var table = SlideTable(columns: [1, 1], rows: [1], cells: [
+            .init(row: 0, column: 0, text: "原文"), .init(row: 0, column: 1, text: "解读")
+        ])
+        table.mergeCell("0:0", along: .column)
+        XCTAssertTrue(table.isValid)
+        XCTAssertEqual(table.cells.first?.text, "原文\n解读")
+        table.appendTrack(.row)
+        table.appendTrack(.column)
+        table.removeTrack(.column, at: 0)
+        XCTAssertTrue(table.isValid)
+        XCTAssertEqual(table.cells.first?.text, "原文\n解读")
+        table.mergeCell("0:0", along: .row)
+        table.splitCell("0:0")
+        XCTAssertTrue(table.isValid)
+        XCTAssertEqual(table.cells.count, 4)
+    }
+
     func testTableRoundTripPreservesMergeCellFormattingAndGeometry() throws {
         let cell = SlideTable.Cell(row: 0, column: 0, rowSpan: 2, columnSpan: 2,
                                    text: "經學史", fontSize: 22, bold: true, fill: "EDF2FC",

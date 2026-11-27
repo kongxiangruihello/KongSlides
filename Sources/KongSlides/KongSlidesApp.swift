@@ -45,7 +45,10 @@ struct EditorView: View {
     @State private var selectedPageIDs: Set<UUID> = []
     @State private var pageSelectionAnchor: UUID?
     @State private var pageToReveal: UUID?
+    @State private var visitHistory = SlideVisitHistory()
     @State private var pageJumpSheet = false
+    @State private var overviewSheet = false
+    @State private var citationSheet = false
     @State private var pendingJump: Int?
     @State private var collapsedSections: Set<UUID> = []
     @State private var pageCommands = false
@@ -160,6 +163,20 @@ struct EditorView: View {
             return true
         }
         .onChange(of: session.pageJumpRequest) { pageJumpSheet = true }
+        .sheet(isPresented: $citationSheet) {
+            let page = slide.id
+            SlideCitationView(citation: slide.citation ?? .init()) { updated in
+                if let index = deck.slides.firstIndex(where: { $0.id == page }) {
+                    document.deck.slides[index].citation = updated == .init() ? nil : updated
+                }
+            }
+        }
+        .sheet(isPresented: $overviewSheet) {
+            SlideOverview(deck: deck, current: slide.id, open: { id in
+                search = ""
+                selectPages([id])
+            }, reorder: reorderOverviewPage, setBackup: setBackup)
+        }
         .sheet(isPresented: $pageJumpSheet, onDismiss: applyPageJump) {
             PageJumpView(currentPage: index + 1, pageCount: deck.slides.count) { pendingJump = $0 }
         }
@@ -335,6 +352,10 @@ struct EditorView: View {
                 }
                 .buttonStyle(.borderless)
                 .help("前往指定幻灯片（⌘J）")
+                .contextMenu {
+                    Button("返回上一浏览页（⌘[）") { stepVisitHistory(backward: true) }
+                    Button("前进到下一浏览页（⌘]）") { stepVisitHistory(backward: false) }
+                }
                 .accessibilityLabel("前往指定幻灯片。当前第 \(index + 1) 页，共 \(deck.slides.count) 页")
                 Button { stepEditorPage(-1) } label: { Image(systemName: "chevron.up") }
                     .buttonStyle(.borderless).disabled(editorPage(-1) == nil)
@@ -371,6 +392,8 @@ struct EditorView: View {
                     }
                 }
             }
+            Button { overviewSheet = true } label: { Label("网格总览…", systemImage: "square.grid.2x2") }
+                .padding(.horizontal, 12).padding(.bottom, 8)
         }
         .padding(.top, 16)
         .background(Color(nsColor: .controlBackgroundColor))
@@ -378,14 +401,7 @@ struct EditorView: View {
 
     private var filteredSlides: [Slide] {
         guard !search.isEmpty else { return deck.slides }
-        return deck.slides.filter { row in
-            row.section.localizedCaseInsensitiveContains(search) ||
-                row.speakerNotes.localizedCaseInsensitiveContains(search) ||
-                row.objects.contains { object in
-                    (object.kind == .text && object.text.localizedCaseInsensitiveContains(search)) ||
-                        object.table?.cells.contains { $0.text.localizedCaseInsensitiveContains(search) } == true
-                }
-        }
+        return deck.slides.filter { SlideSearchHit.first(on: $0, query: search) != nil }
     }
 
     private var visibleSlides: [Slide] {
@@ -432,6 +448,12 @@ struct EditorView: View {
                         Spacer(minLength: 0)
                     }
                     .font(.caption)
+                    if let hit = SlideSearchHit.first(on: row, query: search) {
+                        let snippet = Text(hit.field + " · " + hit.before)
+                            + Text(hit.match).bold().foregroundColor(.accentColor)
+                            + Text(hit.after)
+                        snippet.font(.caption2).foregroundStyle(.secondary).lineLimit(2)
+                    }
                 }
                 .padding(.vertical, 6)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -482,10 +504,10 @@ struct EditorView: View {
                 ZStack(alignment: .topLeading) {
                     SlideSurface(slide: slide, images: deck.images, omittedObject: editingID, canvas: deck.pageCanvas)
                         .onTapGesture { focusCanvas(); objectID = nil; editingID = nil }
-                    ForEach(slide.objects) { object in
+                    ForEach(slide.objects.filter { !$0.isLocked }) { object in
                         objectOverlay(object, scale: scale)
                     }
-                    if let selection, editingID == nil {
+                    if let selection, editingID == nil, !slide.objects[selection].isLocked {
                         let object = slide.objects[selection]
                         SlideResizeHandles(frame: object.frame, scale: scale, proportional: object.kind == .image) { frame in
                             changeObjectFrame(object.id, to: frame)
@@ -555,6 +577,10 @@ struct EditorView: View {
             HStack {
                 Label("逐字讲稿", systemImage: "note.text").font(.headline)
                 Text("第 \(index + 1) 页").font(.caption).foregroundStyle(.secondary)
+                Picker("讲解标记", selection: slideBinding(\.teachingCue)) {
+                    Text("无").tag(nil as Slide.TeachingCue?)
+                    ForEach(Slide.TeachingCue.allCases) { cue in Text(cue.rawValue).tag(Optional(cue)) }
+                }.fixedSize()
                 Spacer()
                 Stepper("\(Int(notesFontSize)) 磅", value: $notesFontSize, in: 12...36)
                 Button("专注视图") { notesFocus = true }
@@ -573,6 +599,9 @@ struct EditorView: View {
             VStack(alignment: .leading, spacing: 14) {
                 Text("版面属性").font(.headline)
                 Button("幻灯片尺寸…") { canvasSheet = true }
+                Button("学术引文与出处…") { citationSheet = true }
+                Toggle("课堂书签", isOn: Binding(get: { slide.bookmarked == true },
+                                                   set: { slideBinding(\.bookmarked).wrappedValue = $0 ? true : nil }))
                 Toggle("备用页", isOn: Binding(get: { slide.isBackup }, set: { setBackup($0, for: [slide.id]) }))
                     .help("顺序放映时跳过，可在放映中手动调出。")
                 TextField("章节名称", text: slideBinding(\.section))
@@ -585,50 +614,56 @@ struct EditorView: View {
                     if let source = object.decorationSource {
                         Text(source.title).font(.caption).foregroundStyle(.secondary)
                     }
-                    if object.kind == .text {
-                        TextEditor(text: textBinding(object.id))
-                            .frame(height: 82)
-                            .border(.secondary.opacity(0.22))
-                            .accessibilityLabel("文本框内容")
-                        Button("局部文字格式…") { formatText = object }.disabled(object.text.isEmpty)
-                        number("字号", object: object, key: \.fontSize, range: 8...200)
-                        Toggle("粗体", isOn: objectBinding(object.id, \.bold, fallback: false))
-                        Menu("文字对齐") {
-                            Button("左对齐") { setAlignment(.left, for: object.id) }
-                            Button("居中") { setAlignment(.center, for: object.id) }
-                            Button("右对齐") { setAlignment(.right, for: object.id) }
-                            Button("两端对齐") { setAlignment(.justified, for: object.id) }
+                    Button(object.isLocked ? "解锁对象" : "锁定对象") {
+                        editingID = nil
+                        objectBinding(object.id, \.locked, fallback: nil).wrappedValue = object.isLocked ? nil : true
+                    }
+                    if !object.isLocked {
+                        if object.kind == .text {
+                            TextEditor(text: textBinding(object.id))
+                                .frame(height: 82)
+                                .border(.secondary.opacity(0.22))
+                                .accessibilityLabel("文本框内容")
+                            Button("局部文字格式…") { formatText = object }.disabled(object.text.isEmpty)
+                            number("字号", object: object, key: \.fontSize, range: 8...200)
+                            Toggle("粗体", isOn: objectBinding(object.id, \.bold, fallback: false))
+                            Menu("文字对齐") {
+                                Button("左对齐") { setAlignment(.left, for: object.id) }
+                                Button("居中") { setAlignment(.center, for: object.id) }
+                                Button("右对齐") { setAlignment(.right, for: object.id) }
+                                Button("两端对齐") { setAlignment(.justified, for: object.id) }
+                            }
                         }
-                    }
-                    if object.kind == .image {
-                        cropControls(object)
-                        pictureAppearanceControls(object)
-                    } else if let table = object.table {
-                        Text("\(table.rows.count) 行 × \(table.columns.count) 列").font(.caption)
-                        Button("编辑单元格…") { editTable = object }
-                    } else {
-                        if object.kind == .connector { connectorControls(object) }
-                        let colorTitle = object.kind == .text ? "文字颜色" : object.kind == .connector ? "线条颜色" : "填充颜色"
-                        colorMenu(colorTitle,
-                                  selection: objectBinding(object.id, \.color, fallback: Palette.ink),
-                                  colors: [("墨黑", Palette.ink), ("靛蓝", Palette.indigo), ("砖红", "A34E42"),
-                                           ("墨绿", "286B61"), ("纯白", "FFFFFF")])
-                    }
-                    Grid(alignment: .leading, horizontalSpacing: 8, verticalSpacing: 10) {
-                        GridRow {
-                            number("X", object: object, key: \.x, range: -960...960)
-                            number("Y", object: object, key: \.y, range: -540...540)
+                        if object.kind == .image {
+                            cropControls(object)
+                            pictureAppearanceControls(object)
+                        } else if let table = object.table {
+                            Text("\(table.rows.count) 行 × \(table.columns.count) 列").font(.caption)
+                            Button("编辑单元格…") { editTable = object }
+                        } else {
+                            if object.kind == .connector { connectorControls(object) }
+                            let colorTitle = object.kind == .text ? "文字颜色" : object.kind == .connector ? "线条颜色" : "填充颜色"
+                            colorMenu(colorTitle,
+                                      selection: objectBinding(object.id, \.color, fallback: Palette.ink),
+                                      colors: [("墨黑", Palette.ink), ("靛蓝", Palette.indigo), ("砖红", "A34E42"),
+                                               ("墨绿", "286B61"), ("纯白", "FFFFFF")])
                         }
-                        GridRow {
-                            number("宽", object: object, key: \.width, range: 1...1920)
-                            number("高", object: object, key: \.height, range: 1...1080)
+                        Grid(alignment: .leading, horizontalSpacing: 8, verticalSpacing: 10) {
+                            GridRow {
+                                number("X", object: object, key: \.x, range: -960...960)
+                                number("Y", object: object, key: \.y, range: -540...540)
+                            }
+                            GridRow {
+                                number("宽", object: object, key: \.width, range: 1...1920)
+                                number("高", object: object, key: \.height, range: 1...1080)
+                            }
                         }
+                        HStack {
+                            Button("置顶") { changeLayer(object.id, front: true) }
+                            Button("置底") { changeLayer(object.id, front: false) }
+                        }
+                        Button("删除对象", role: .destructive) { removeObject(object.id) }
                     }
-                    HStack {
-                        Button("置顶") { changeLayer(object.id, front: true) }
-                        Button("置底") { changeLayer(object.id, front: false) }
-                    }
-                    Button("删除对象", role: .destructive) { removeObject(object.id) }
                 }
                 if !slide.objects.isEmpty {
                     Divider()
@@ -638,7 +673,7 @@ struct EditorView: View {
                             focusCanvas()
                             objectID = object.id
                         } label: {
-                            Label(object.label, systemImage: object.kind == .text ? "textformat" :
+                            Label(object.label, systemImage: object.isLocked ? "lock" : object.kind == .text ? "textformat" :
                                     object.kind == .image ? "photo" : object.kind == .table ? "tablecells" :
                                     object.kind == .connector ? "arrow.up.right" : "rectangle")
                                 .lineLimit(1)
@@ -915,6 +950,13 @@ struct EditorView: View {
         if let target = editorPage(direction) { selectPages([target]) }
     }
 
+    private func stepVisitHistory(backward: Bool) {
+        guard let page = visitHistory.step(from: slide.id, backward: backward, available: Set(deck.slides.map(\.id))) else { return }
+        if !search.isEmpty && !filteredSlides.contains(where: { $0.id == page }) { search = "" }
+        activatePages(SidebarPageSelection(current: page, selected: [page], anchor: page),
+                      reveal: true, recordVisit: false)
+    }
+
     private func handleShortcut(_ event: NSEvent) -> Bool {
         let modifiers = event.modifierFlags.intersection([.command, .shift, .option, .control])
         if modifiers.isEmpty {
@@ -945,6 +987,9 @@ struct EditorView: View {
             guard let selection else { return false }
             let box = SlideClipboard(slides: [Slide(objects: [slide.objects[selection]])], images: deck.images, canvas: deck.pageCanvas)
             insert(box, at: index, asObject: true)
+            return true
+        case "[", "]":
+            stepVisitHistory(backward: event.charactersIgnoringModifiers == "[")
             return true
         case "a":
             guard pageCommands else { return false }
@@ -1019,7 +1064,8 @@ struct EditorView: View {
         activatePages(SidebarPageSelection(current: first, selected: Set(ids), anchor: first), reveal: reveal)
     }
 
-    private func activatePages(_ selection: SidebarPageSelection, reveal: Bool) {
+    private func activatePages(_ selection: SidebarPageSelection, reveal: Bool, recordVisit: Bool = true) {
+        if recordVisit { visitHistory.visit(from: slide.id, to: selection.current) }
         if let window = NSApp.keyWindow, window.firstResponder is NSTextView {
             window.makeFirstResponder(nil)
         }
@@ -1081,6 +1127,13 @@ struct EditorView: View {
         slideID = current
     }
 
+    private func reorderOverviewPage(_ source: UUID, _ target: UUID) -> Bool {
+        guard source != target, let start = deck.slides.firstIndex(where: { $0.id == source }),
+              let end = deck.slides.firstIndex(where: { $0.id == target }) else { return false }
+        reorder(from: IndexSet(integer: start), to: end > start ? end + 1 : end)
+        return true
+    }
+
     private func reorder(from offsets: IndexSet, to destination: Int) {
         let current = slide.id
         document.deck.slides.move(fromOffsets: offsets, toOffset: destination)
@@ -1102,6 +1155,7 @@ struct EditorView: View {
     }
 
     private func removeObject(_ id: UUID) {
+        guard slide.objects.first(where: { $0.id == id })?.isLocked != true else { return }
         var updated = deck
         updated.slides[index].objects.removeAll { $0.id == id }
         if objectID == id { objectID = nil }

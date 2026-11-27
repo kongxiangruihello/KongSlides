@@ -2,6 +2,23 @@ import XCTest
 @testable import KongSlides
 
 final class EditingOperationsTests: XCTestCase {
+    func testVisitHistorySkipsDeletedPagesAndCanGoForward() {
+        let a = UUID(), b = UUID(), c = UUID()
+        var history = SlideVisitHistory()
+        history.visit(from: a, to: b)
+        history.visit(from: b, to: c)
+        XCTAssertEqual(history.step(from: c, backward: true, available: [a, c]), a)
+        XCTAssertEqual(history.step(from: a, backward: false, available: [a, c]), c)
+    }
+
+    func testSearchSnippetIdentifiesNotesAndPreservesMatchCase() {
+        let slide = Slide(speakerNotes: "说明经学史的Qing学术背景")
+        let hit = SlideSearchHit.first(on: slide, query: "qing")
+        XCTAssertEqual(hit?.field, "讲稿")
+        XCTAssertEqual(hit?.match, "Qing")
+        XCTAssertEqual(hit?.before, "说明经学史的")
+    }
+
     func testSlidePageNumberAcceptsFullwidthDigitsAndRejectsOutOfRangeInput() {
         XCTAssertEqual(SlidePageNumber.parse(" ８８ ", pageCount: 100), 88)
         XCTAssertEqual(SlidePageNumber.parse("100", pageCount: 100), 100)
