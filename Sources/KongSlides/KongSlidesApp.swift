@@ -1276,7 +1276,7 @@ struct EditorView: View {
         guard panel.runModal() == .OK, let location = panel.url else { return }
         var snapshot = deck
         snapshot.slides = Array(snapshot.slides[range])
-        let name = "\(documentName)-\(chapter)"
+        let name = "\(session.name)-\(chapter)"
         let sectionDeck = snapshot
         Task { @MainActor in
             do {
@@ -1291,7 +1291,7 @@ struct EditorView: View {
     private func exportTeachingPDF(_ format: TeachingPDF.Format) {
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.pdf]
-        panel.nameFieldStringValue = "\(documentName)-\(format.label).pdf"
+        panel.nameFieldStringValue = "\(session.name)-\(format.label).pdf"
         let backupOption = format == .teacher ? nil : backupExportOption(for: panel)
         guard panel.runModal() == .OK, let url = panel.url else { return }
         let includeBackups = backupOption?.state == .on
@@ -1308,7 +1308,7 @@ struct EditorView: View {
     private func export(_ type: ExportType) {
         let panel = NSSavePanel()
         panel.allowedContentTypes = [type.contentType]
-        panel.nameFieldStringValue = documentName + "." + type.rawValue
+        panel.nameFieldStringValue = session.name + "." + type.rawValue
         let backupOption = type == .pdf ? backupExportOption(for: panel) : nil
         guard panel.runModal() == .OK, let url = panel.url else { return }
         do {

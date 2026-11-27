@@ -169,6 +169,5 @@ private struct EditorWindowContent: View {
             .id(session.identity)
             .frame(minWidth: 1040, minHeight: 660)
             .tint(Color(nsColor: Palette.color(Palette.indigo)))
-            .environment(\.undoManager, session.undoManager)
     }
 }
