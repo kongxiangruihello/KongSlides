@@ -30,7 +30,7 @@ private enum NativeDocumentChanged: LocalizedError {
     var errorDescription: String? { "文件已被其他应用或同步服务修改。请重新打开，或把当前课件另存为副本。" }
 }
 
-enum DeckSaveFormat: Int, CaseIterable {
+enum DeckSaveFormat {
     case native, powerPoint
 
     var title: String {
@@ -41,46 +41,6 @@ enum DeckSaveFormat: Int, CaseIterable {
     }
 
     var contentType: UTType { self == .native ? .kongSlides : .slidePowerPoint }
-}
-
-@MainActor
-private final class SaveFormatPicker: NSObject {
-    private weak var panel: NSSavePanel?
-    private let copyName: String?
-    private let originalName: String
-    private(set) var format = DeckSaveFormat.native
-
-    init(panel: NSSavePanel, copyName: String?) {
-        self.panel = panel
-        self.copyName = copyName
-        self.originalName = panel.nameFieldStringValue
-        super.init()
-        let picker = NSPopUpButton(frame: .zero, pullsDown: false)
-        picker.setAccessibilityLabel("保存格式")
-        for format in DeckSaveFormat.allCases {
-            picker.addItem(withTitle: format.title)
-            picker.lastItem?.tag = format.rawValue
-        }
-        picker.target = self
-        picker.action = #selector(selectFormat(_:))
-        let row = NSStackView(views: [NSTextField(labelWithString: "格式"), picker])
-        row.spacing = 8
-        row.alignment = .centerY
-        row.edgeInsets = NSEdgeInsets(top: 4, left: 12, bottom: 4, right: 12)
-        row.setFrameSize(row.fittingSize)
-        panel.accessoryView = row
-    }
-
-    @objc private func selectFormat(_ picker: NSPopUpButton) {
-        guard let panel, let tag = picker.selectedItem?.tag, let next = DeckSaveFormat(rawValue: tag) else { return }
-        let name = panel.nameFieldStringValue
-        format = next
-        panel.allowedContentTypes = [format.contentType]
-        if let copyName {
-            if next == .powerPoint && name == originalName { panel.nameFieldStringValue = copyName }
-            if next == .native && name == copyName { panel.nameFieldStringValue = originalName }
-        }
-    }
 }
 
 @MainActor @Observable
@@ -442,12 +402,15 @@ final class EditorFileSession {
             destination = fileURL
             format = .native
         } else {
-            let panel = makeSavePanel(format: preset ?? .native)
+            if let preset { format = preset }
+            else if asCopy {
+                guard let choice = await chooseSaveFormat(in: window) else { return }
+                format = choice
+            } else { format = .native }
+            let panel = makeSavePanel(format: format)
             let sameSourceName = sourceURL?.pathExtension.lowercased() == "pptx" &&
                 sourceURL?.deletingPathExtension().lastPathComponent == name
-            let copyName = sameSourceName ? name + " 副本" : nil
-            if preset == .powerPoint, let copyName { panel.nameFieldStringValue = copyName }
-            let picker = asCopy && preset == nil ? SaveFormatPicker(panel: panel, copyName: copyName) : nil
+            if format == .powerPoint && sameSourceName { panel.nameFieldStringValue = name + " 副本" }
             saveDialogOpen = true
             let response = await withCheckedContinuation { continuation in
                 panel.beginSheetModal(for: window) { continuation.resume(returning: $0) }
@@ -455,7 +418,6 @@ final class EditorFileSession {
             saveDialogOpen = false
             guard response == .OK, let url = panel.url else { return }
             destination = url
-            format = picker?.format ?? preset ?? .native
         }
         do {
             try await writeRequestedSave(to: destination, format: format)
@@ -470,6 +432,24 @@ final class EditorFileSession {
             if response == .alertThirdButtonReturn { open(destination, discardEditsToReload: true) }
         } catch {
             self.error = "无法保存「\(destination.lastPathComponent)」。\n\(error.localizedDescription)"
+        }
+    }
+
+    private func chooseSaveFormat(in window: NSWindow) async -> DeckSaveFormat? {
+        let alert = NSAlert()
+        alert.messageText = "选择另存为格式"
+        alert.addButton(withTitle: DeckSaveFormat.native.title)
+        alert.addButton(withTitle: DeckSaveFormat.powerPoint.title)
+        alert.addButton(withTitle: "取消").keyEquivalent = "\u{1b}"
+        saveDialogOpen = true
+        defer { saveDialogOpen = false }
+        let response = await withCheckedContinuation { continuation in
+            alert.beginSheetModal(for: window) { continuation.resume(returning: $0) }
+        }
+        switch response {
+        case .alertFirstButtonReturn: return .native
+        case .alertSecondButtonReturn: return .powerPoint
+        default: return nil
         }
     }
 
@@ -504,7 +484,7 @@ final class EditorFileSession {
 
     private func makeSavePanel(format: DeckSaveFormat = .native) -> NSSavePanel {
         let panel = NSSavePanel()
-        panel.title = "另存为课件"
+        panel.title = format == .powerPoint ? "另存为 PowerPoint" : "另存为课件"
         panel.prompt = "保存"
         panel.nameFieldLabel = "文件名："
         panel.allowedContentTypes = [format.contentType]
