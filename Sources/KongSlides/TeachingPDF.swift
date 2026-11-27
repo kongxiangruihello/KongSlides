@@ -45,6 +45,33 @@ enum TeachingPDF {
         try (output as Data).write(to: url, options: .atomic)
     }
 
+    static func chapterPackage(_ deck: Deck, title: String, in folder: URL) throws -> URL {
+        let disallowed = CharacterSet.controlCharacters.union(CharacterSet(charactersIn: "/:"))
+        let safeTitle = String(title.components(separatedBy: disallowed).joined(separator: "-").prefix(40))
+            .trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: ".")))
+        let base = safeTitle.isEmpty ? "课堂资料" : safeTitle
+        let files = FileManager.default
+        let temporary = folder.appendingPathComponent(".KongSlides-\(UUID().uuidString)", isDirectory: true)
+        try files.createDirectory(at: temporary, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        defer { try? files.removeItem(at: temporary) }
+        try SlideDrawing.pdf(deck, includeBackups: false,
+                             to: temporary.appendingPathComponent(base + "-投影.pdf"))
+        try write(deck, format: .teacher, to: temporary.appendingPathComponent(base + "-教师讲稿.pdf"))
+        try write(deck, format: .studentThree, to: temporary.appendingPathComponent(base + "-学生配布稿.pdf"))
+        var number = 1
+        while number <= 100 {
+            let suffix = number == 1 ? "" : "-\(number)"
+            let destination = folder.appendingPathComponent(base + "-授课资料" + suffix, isDirectory: true)
+            do {
+                try files.moveItem(at: temporary, to: destination)
+                return destination
+            } catch let error as CocoaError where error.code == .fileWriteFileExists {
+                number += 1
+            }
+        }
+        throw CocoaError(.fileWriteFileExists)
+    }
+
     private static func teacher(_ deck: Deck, in context: CGContext) throws {
         var pages = 0
         for (index, slide) in deck.slides.enumerated() {

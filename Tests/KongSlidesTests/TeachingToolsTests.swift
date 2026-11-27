@@ -103,4 +103,20 @@ final class TeachingToolsTests: XCTestCase {
             XCTAssertEqual(handout.page(at: 0)?.bounds(for: .mediaBox).width ?? 0, 595.28, accuracy: 0.1)
         }
     }
+
+    func testChapterPackageCreatesThreePDFsWithoutOverwritingAnEarlierExport() throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let deck = Deck(slides: [Slide.titleSlide("原文", subtitle: "内容")])
+        let first = try TeachingPDF.chapterPackage(deck, title: "讲稿/第一章", in: folder)
+        let second = try TeachingPDF.chapterPackage(deck, title: "讲稿/第一章", in: folder)
+        XCTAssertNotEqual(first, second)
+        for package in [first, second] {
+            let entries = try FileManager.default.contentsOfDirectory(at: package, includingPropertiesForKeys: nil)
+            XCTAssertEqual(entries.count, 3)
+            XCTAssertTrue(entries.allSatisfy { PDFDocument(url: $0)?.pageCount == 1 })
+        }
+    }
+
 }

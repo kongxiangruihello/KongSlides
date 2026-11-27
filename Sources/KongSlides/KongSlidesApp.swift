@@ -233,6 +233,8 @@ struct EditorView: View {
                 Divider()
                 Button("导出可编辑 PPTX…") { export(.powerPoint) }
                 Button("导出投影 PDF…") { export(.pdf) }
+                Button("导出本章授课资料…", action: exportChapterPackage)
+                    .disabled(slide.section.isEmpty)
                 Menu("导出讲稿与配布 PDF") {
                     Button("教师讲稿版…") { exportTeachingPDF(.teacher) }
                     Button("学生配布版 · 每页 2 张…") { exportTeachingPDF(.studentTwo) }
@@ -1027,6 +1029,29 @@ struct EditorView: View {
         checkbox.setFrameSize(checkbox.fittingSize)
         panel.accessoryView = checkbox
         return checkbox
+    }
+
+    private func exportChapterPackage() {
+        guard !slide.section.isEmpty, let range = sectionRange(slide.id) else { return }
+        let chapter = slide.section
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.prompt = "导出到此处"
+        guard panel.runModal() == .OK, let location = panel.url else { return }
+        var snapshot = deck
+        snapshot.slides = Array(snapshot.slides[range])
+        let name = "\(documentName)-\(chapter)"
+        let sectionDeck = snapshot
+        Task { @MainActor in
+            do {
+                let result = try await Task.detached(priority: .userInitiated) {
+                    try TeachingPDF.chapterPackage(sectionDeck, title: name, in: location)
+                }.value
+                NSWorkspace.shared.activateFileViewerSelecting([result])
+            } catch { linkedError = "无法导出本章授课资料。\n\(error.localizedDescription)" }
+        }
     }
 
     private func exportTeachingPDF(_ format: TeachingPDF.Format) {

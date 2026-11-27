@@ -23,6 +23,9 @@ final class PresentationController: NSObject, ObservableObject, NSWindowDelegate
     @Published private(set) var started = Date()
     @Published private(set) var dualScreen = false
     @Published var showSingleScreenControls = true
+    @Published var blackScreen = false
+    @Published var drawingEnabled = false
+    @Published var ink: [[CGPoint]] = []
 
     private var projection: NSWindow?
     private var console: NSWindow?
@@ -56,6 +59,8 @@ final class PresentationController: NSObject, ObservableObject, NSWindowDelegate
             case 115: self.goToBoundary(last: false)
             case 119: self.goToBoundary(last: true)
             case 15: self.returnToRegularSlide()
+            case 11: self.blackScreen.toggle()
+            case 35: self.drawingEnabled.toggle()
             case 8: if !self.dualScreen { self.showSingleScreenControls.toggle() }
             default: return event
             }
@@ -83,6 +88,7 @@ final class PresentationController: NSObject, ObservableObject, NSWindowDelegate
         } else {
             regularReturnIndex = nil
         }
+        if index != position { ink.removeAll() }
         index = position
     }
 
@@ -113,6 +119,9 @@ final class PresentationController: NSObject, ObservableObject, NSWindowDelegate
         console = nil
         dualScreen = false
         regularReturnIndex = nil
+        blackScreen = false
+        drawingEnabled = false
+        ink.removeAll()
         for window in windows {
             window.delegate = nil
             window.orderOut(nil)
@@ -203,16 +212,20 @@ private struct ProjectionView: View {
     var body: some View {
         ZStack {
             Color.black
-            SlideSurface(slide: session.deck.slides[session.index], images: session.deck.images)
+            if !session.blackScreen {
+                SlideSurface(slide: session.deck.slides[session.index], images: session.deck.images)
+                    .overlay { PresentationInk(session: session, interactive: !session.dualScreen) }
+            }
         }
         .ignoresSafeArea()
         .overlay(alignment: .bottom) {
-            if !session.dualScreen && session.showSingleScreenControls {
+            if !session.dualScreen && session.showSingleScreenControls && !session.blackScreen {
                 HStack(spacing: 14) {
                     Button("上一页") { session.step(-1) }.disabled(session.sequentialIndex(-1) == nil)
                     Text("\(session.index + 1) / \(session.deck.slides.count)").monospacedDigit()
                     Button("下一页") { session.step(1) }.disabled(session.sequentialIndex(1) == nil)
                     BackupPageMenu(session: session)
+                    ProjectionTools(session: session)
                     Button("隐藏控件") { session.showSingleScreenControls = false }.help("按 C 再显示控件")
                     Button("结束放映", action: session.stop)
                 }
@@ -242,6 +255,7 @@ private struct PresenterView: View {
                     Text(String(format: "%02d:%02d:%02d", elapsed / 3600, (elapsed / 60) % 60, elapsed % 60))
                         .monospacedDigit().font(.title2)
                 }
+                ProjectionTools(session: session)
                 Button("交换屏幕", action: session.swapScreens)
                 Button("结束放映", action: session.stop)
             }
@@ -249,6 +263,7 @@ private struct PresenterView: View {
                 VStack(alignment: .leading) {
                     Text("当前页").font(.headline)
                     SlideSurface(slide: slide, images: session.deck.images)
+                        .overlay { PresentationInk(session: session, interactive: true) }
                     HStack {
                         Button("上一页") { session.step(-1) }.disabled(session.sequentialIndex(-1) == nil)
                         Button("下一页") { session.step(1) }.disabled(session.sequentialIndex(1) == nil)
@@ -302,5 +317,62 @@ private struct BackupPageMenu: View {
                 Button("返回正片", action: session.returnToRegularSlide).help("按 R 返回调出备用页前的位置")
             }
         }
+    }
+}
+
+private struct ProjectionTools: View {
+    @ObservedObject var session: PresentationController
+
+    var body: some View {
+        Menu("放映工具") {
+            Button(session.blackScreen ? "恢复投影（B）" : "黑屏（B）") { session.blackScreen.toggle() }
+            Button(session.drawingEnabled ? "停用临时画笔（P）" : "启用临时画笔（P）") {
+                session.drawingEnabled.toggle()
+            }
+            Button("清除本页笔迹") { session.ink.removeAll() }.disabled(session.ink.isEmpty)
+        }
+    }
+}
+
+private struct PresentationInk: View {
+    @ObservedObject var session: PresentationController
+    let interactive: Bool
+    @GestureState private var drawing = false
+    @State private var lastStroke: Int?
+
+    var body: some View {
+        Canvas { graphics, size in
+            for stroke in session.ink {
+                var line = Path()
+                let points = stroke.map { CGPoint(x: $0.x * size.width, y: $0.y * size.height) }
+                line.addLines(points)
+                graphics.stroke(line, with: .color(.red), style: StrokeStyle(lineWidth: 4, lineCap: .round, lineJoin: .round))
+            }
+        }
+        .clipped()
+        .overlay {
+            if interactive && session.drawingEnabled && !session.blackScreen {
+                GeometryReader { geometry in
+                    Rectangle().fill(.clear).contentShape(Rectangle())
+                        .gesture(DragGesture(minimumDistance: 0)
+                            .updating($drawing) { _, active, _ in active = true }
+                            .onChanged { value in
+                                let w = max(1, geometry.size.width)
+                                let h = max(1, geometry.size.height)
+                                let point = CGPoint(x: min(1, max(0, value.location.x / w)),
+                                                    y: min(1, max(0, value.location.y / h)))
+                                if let lastStroke, session.ink.indices.contains(lastStroke) {
+                                    session.ink[lastStroke].append(point)
+                                } else {
+                                    session.ink.append([point])
+                                    lastStroke = session.ink.count - 1
+                                }
+                            }
+                            .onEnded { _ in lastStroke = nil })
+                }
+            }
+        }
+        .onChange(of: drawing) { if !drawing { lastStroke = nil } }
+        .allowsHitTesting(interactive && session.drawingEnabled && !session.blackScreen)
     }
 }

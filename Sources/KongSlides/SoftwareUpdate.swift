@@ -80,24 +80,16 @@ final class SoftwareUpdate {
 
             didPromptForDownload = true
             let progress = UpdateProgressPanel(title: "KongSlides 软件更新")
-            let downloadProgress = UpdateDownloadProgress(expectedBytes: offer.bytes, panel: progress)
-            progress.show("正在下载更新…", fraction: 0)
-            defer { downloadProgress.finished = true; progress.dismiss() }
-            let (archive, download) = try await session.download(
-                for: URLRequest(url: offer.downloadURL, timeoutInterval: 60), delegate: downloadProgress
-            )
-            downloadProgress.finished = true
-            progress.show("正在校验安装包…")
-            defer { try? FileManager.default.removeItem(at: archive) }
-            guard (download as? HTTPURLResponse)?.statusCode == 200 else { throw UpdateProblem.connection }
-
             let files = FileManager.default
             let downloadFolder = files.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
             try files.createDirectory(at: downloadFolder, withIntermediateDirectories: false,
                                       attributes: [.posixPermissions: 0o700])
             defer { try? files.removeItem(at: downloadFolder) }
             let downloaded = downloadFolder.appendingPathComponent("update.zip")
-            try files.moveItem(at: archive, to: downloaded)
+            progress.show("正在下载更新…", fraction: 0)
+            defer { progress.dismiss() }
+            try await download(offer, to: downloaded, panel: progress)
+            progress.show("正在校验安装包…")
 
             let app = Bundle.main.bundleURL.resolvingSymlinksInPath().standardizedFileURL
             let update: StagedUpdate
@@ -123,6 +115,38 @@ final class SoftwareUpdate {
             }
         }
         #endif
+    }
+
+    private func download(_ offer: UpdateOffer, to destination: URL, panel: UpdateProgressPanel) async throws {
+        let status = Progress(totalUnitCount: Int64(offer.bytes))
+        let task = Task { @MainActor in
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                let request = URLRequest(url: offer.downloadURL, timeoutInterval: 60)
+                let download = session.downloadTask(with: request) { url, response, error in
+                    do {
+                        if let error { throw error }
+                        guard let url, (response as? HTTPURLResponse)?.statusCode == 200 else {
+                            throw UpdateProblem.connection
+                        }
+                        try FileManager.default.moveItem(at: url, to: destination)
+                        continuation.resume()
+                    } catch { continuation.resume(throwing: error) }
+                }
+                status.addChild(download.progress, withPendingUnitCount: status.totalUnitCount)
+                download.resume()
+            }
+        }
+        let monitor = Task { @MainActor in
+            while !Task.isCancelled {
+                if status.totalUnitCount > 0 {
+                    let fraction = min(1, max(0, status.fractionCompleted))
+                    panel.show("正在下载更新… \(Int(fraction * 100))%", fraction: fraction)
+                }
+                try await Task.sleep(for: .milliseconds(150))
+            }
+        }
+        defer { monitor.cancel() }
+        try await task.value
     }
 
     private func prepare(_ archive: URL, offer: UpdateOffer, source: URL,
@@ -207,32 +231,7 @@ final class SoftwareUpdate {
     }
 }
 
-private final class UpdateDownloadProgress: GitHubRedirects, URLSessionDownloadDelegate {
-    private let expectedBytes: Int64
-    @MainActor private weak var panel: UpdateProgressPanel?
-    @MainActor var finished = false
-
-    @MainActor
-    init(expectedBytes: Int, panel: UpdateProgressPanel) {
-        self.expectedBytes = Int64(expectedBytes)
-        self.panel = panel
-    }
-
-    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
-                    didWriteData bytesWritten: Int64, totalBytesWritten: Int64,
-                    totalBytesExpectedToWrite: Int64) {
-        let fraction = min(1, Double(totalBytesWritten) / Double(expectedBytes))
-        Task { @MainActor in
-            guard !finished else { return }
-            panel?.show("正在下载更新… \(Int(fraction * 100))%", fraction: fraction)
-        }
-    }
-
-    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
-                    didFinishDownloadingTo location: URL) {}
-}
-
-private class GitHubRedirects: NSObject, URLSessionTaskDelegate {
+private final class GitHubRedirects: NSObject, URLSessionTaskDelegate {
     private static let hosts: Set<String> = [
         "github.com", "api.github.com", "release-assets.githubusercontent.com",
         "objects.githubusercontent.com", "github-releases.githubusercontent.com"
