@@ -28,7 +28,7 @@ func find(_ identifier: String) -> AXUIElement? {
 }
 
 func waitFor(_ identifier: String) -> AXUIElement? {
-    for _ in 0..<40 {
+    for _ in 0..<100 {
         if let result = find(identifier) { return result }
         Thread.sleep(forTimeInterval: 0.1)
     }
@@ -93,14 +93,32 @@ func key(_ code: CGKeyCode, flags: CGEventFlags = []) {
 
 if let running = NSRunningApplication(processIdentifier: pid) { _ = running.activate(options: []) }
 let pages = Array(CommandLine.arguments.dropFirst(2))
+func homeVisible() -> Bool {
+    for _ in 0..<100 {
+        if find("kongslides-home-search") != nil || find("新建课件") != nil || find("搜索收藏和最近打开的课件") != nil { return true }
+        Thread.sleep(forTimeInterval: 0.1)
+    }
+    return false
+}
+func dumpAccessibility() {
+    var pending = [app]
+    for _ in 0..<150 {
+        guard !pending.isEmpty else { break }
+        let element = pending.removeFirst()
+        let keys = [kAXRoleAttribute, kAXIdentifierAttribute, kAXTitleAttribute, kAXDescriptionAttribute]
+        print(keys.compactMap { attribute(element, $0 as CFString) as? String }.joined(separator: " | "))
+        pending += attribute(element, kAXChildrenAttribute as CFString) as? [AXUIElement] ?? []
+    }
+}
 if pages == ["--home"] {
-    guard waitFor("kongslides-home-search") != nil else { fail("Home did not appear after launch") }
+    guard homeVisible() else { dumpAccessibility(); fail("Home did not appear after launch") }
     print("Desktop startup reached the KongSlides home.")
     exit(0)
 }
 if pages == ["--home-roundtrip"] {
     clickElement("返回首页")
-    guard waitFor("kongslides-home-search") != nil else { fail("Editor did not return to home") }
+    guard homeVisible() else { dumpAccessibility(); fail("Editor did not return to home") }
+    guard waitFor("收藏 Second") != nil else { dumpAccessibility(); fail("Recently opened file is missing from home") }
     clickElement("收藏 Second")
     guard waitFor("移除收藏 Second") != nil else { fail("Favorite did not update") }
     clickElement("继续编辑")
