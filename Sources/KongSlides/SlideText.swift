@@ -38,12 +38,7 @@ enum SlideText {
 
     private static func attributed(_ object: SlideObject) -> NSAttributedString {
         let size = CGFloat(object.fontSize)
-        func font(_ name: String?, size: CGFloat, bold: Bool) -> NSFont {
-            let fallback = bold ? NSFont.boldSystemFont(ofSize: size) : NSFont.systemFont(ofSize: size)
-            guard let name, let found = NSFont(name: name, size: size) else { return fallback }
-            return bold ? NSFont(descriptor: found.fontDescriptor.withSymbolicTraits(.bold), size: size) ?? fallback : found
-        }
-        let baseFont = font(object.textLayout?.fontName, size: size, bold: object.bold)
+        let baseFont = SlideFonts.typeface(object.textLayout?.fontName, size: size, bold: object.bold)
 
         let result = NSMutableAttributedString(string: "")
         let paragraphs = object.textLayout?.paragraphs ?? []
@@ -86,7 +81,7 @@ enum SlideText {
                 var attributes = base
                 if let run {
                     let pointSize = CGFloat(run.size ?? object.fontSize)
-                    attributes[.font] = font(run.fontName ?? object.textLayout?.fontName,
+                    attributes[.font] = SlideFonts.typeface(run.fontName ?? object.textLayout?.fontName,
                                              size: pointSize * (run.baseline == 0 ? 1 : 0.72), bold: run.bold)
                     attributes[.foregroundColor] = Palette.color(run.color)
                     attributes[.baselineOffset] = Double(pointSize) * run.baseline

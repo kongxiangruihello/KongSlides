@@ -59,6 +59,7 @@ struct EditorView: View {
     @State private var notesFocus = false
     @State private var teachingSheet: TeachingSheet?
     @State private var canvasSheet = false
+    @State private var fontReplacementSheet = false
     @State private var formatText: SlideObject?
     @State private var recoverySheet = false
     @State private var recoveryID = UUID()
@@ -196,6 +197,14 @@ struct EditorView: View {
         .sheet(isPresented: $canvasSheet) {
             CanvasSizeView(deck: deck, slideID: slide.id) { size in document.deck = deck.fitted(to: size) }
         }
+        .sheet(isPresented: $fontReplacementSheet) {
+            FontReplacementView(names: SlideFonts.requested(in: deck)) { source, replacement in
+                var changed = deck
+                SlideFonts.replace(source, with: replacement, in: &changed)
+                if changed != deck { document.deck = changed }
+                if reviewMode == .preflight { runPreflight() }
+            }
+        }
         .sheet(item: $formatText) { object in
             TextRunFormatView(object: object) { runs in
                 if let index = slide.objects.firstIndex(where: { $0.id == object.id }) {
@@ -276,6 +285,7 @@ struct EditorView: View {
                 Button("查看 PPTX 导入报告") { reviewMode = .imported }
                     .disabled(!deck.slides.contains { $0.importReport != nil })
                 Button("对照原稿 PDF…", action: chooseReferencePDF)
+                Button("全文替换字体…") { fontReplacementSheet = true }
                 Button("课件恢复…") { recoverySheet = true }
                 Divider()
                 Button("导出可编辑 PPTX…") { export(.powerPoint) }
@@ -552,6 +562,7 @@ struct EditorView: View {
                     }
                     if object.kind == .image {
                         cropControls(object)
+                        pictureAppearanceControls(object)
                     } else {
                         colorMenu(object.kind == .text ? "文字颜色" : "填充颜色",
                                   selection: objectBinding(object.id, \.color, fallback: Palette.ink),
@@ -597,6 +608,30 @@ struct EditorView: View {
             .padding(14)
         }
         .background(Color(nsColor: .controlBackgroundColor))
+    }
+
+    private func pictureAppearanceControls(_ object: SlideObject) -> some View {
+        let appearance = objectBinding(object.id, \.pictureAppearance, fallback: nil)
+        func field<Value>(_ path: WritableKeyPath<PictureAppearance, Value>) -> Binding<Value> {
+            Binding(get: { (appearance.wrappedValue ?? .init())[keyPath: path] },
+                    set: { value in
+                        var updated = appearance.wrappedValue ?? .init()
+                        updated[keyPath: path] = value
+                        if updated.isValid { appearance.wrappedValue = updated == .init() ? nil : updated }
+                    })
+        }
+        return VStack(alignment: .leading, spacing: 6) {
+            TextField("旋转角度", value: field(\.angle), format: .number.precision(.fractionLength(0...1)))
+                .help("输入 −360 至 360 度，正数为顺时针。")
+            Slider(value: field(\.opacity), in: 0...1, step: 0.01) {
+                Text("不透明度")
+            }.help("不透明度")
+            Text((field(\.opacity).wrappedValue).formatted(.percent.precision(.fractionLength(0))))
+                .font(.caption).foregroundStyle(.secondary)
+            Toggle("水平翻转", isOn: field(\.flipHorizontal))
+            Toggle("垂直翻转", isOn: field(\.flipVertical))
+            Button("重置旋转、翻转和透明度") { appearance.wrappedValue = nil }
+        }
     }
 
     private func cropControls(_ object: SlideObject) -> some View {
@@ -1039,6 +1074,7 @@ struct EditorView: View {
             checking: mode == .preflight && checkingPreflight,
             refresh: runPreflight,
             compare: chooseReferencePDF,
+            fonts: { fontReplacementSheet = true },
             close: { reviewMode = nil },
             reveal: { row in
                 guard let target = deck.slides.first(where: { $0.id == row.slideID }) else { return }
@@ -1183,7 +1219,7 @@ private final class ImportProgress {
 
 extension PowerPoint {
     static func readForEditor(_ url: URL, progress: ((Int, Int) -> Void)? = nil) throws -> ImportedDeck {
-        try read(url, fontAvailable: { NSFont(name: $0, size: 12) != nil }, progress: progress) { data in
+        try read(url, fontAvailable: { SlideFonts.named($0, size: 12) != nil }, progress: progress) { data in
             guard let source = CGImageSourceCreateWithData(data as CFData, nil),
                   let image = PhotoStorage.thumbnail(source) else { return nil }
             return PhotoStorage.png(image)

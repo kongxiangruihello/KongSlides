@@ -37,6 +37,7 @@ struct SlideReviewRow: Identifiable {
 
     static func preflight(_ deck: Deck) -> [Self] {
         let canvas = CGRect(origin: .zero, size: deck.pageCanvas.size).insetBy(dx: -0.1, dy: -0.1)
+        var fontAudit = CJKFontAudit()
         return deck.slides.enumerated().flatMap { index, slide in
             slide.objects.flatMap { object -> [Self] in
                 var rows: [Self] = []
@@ -44,12 +45,28 @@ struct SlideReviewRow: Identifiable {
                     rows.append(Self(slideID: slide.id, objectID: object.id, page: index + 1,
                                      title: title, detail: detail))
                 }
-                if !canvas.contains(object.frame) {
+                let bounds = object.pictureAppearance?.bounds(of: object.frame) ?? object.frame
+                if !canvas.contains(bounds) {
                     add(object.kind == .image ? "图片超出画布" : "对象超出画布",
                         "「\(object.label)」的画布外部分在放映和 PDF 中会被裁掉。")
                 }
-                if object.kind == .text && SlideText.isClipped(object) {
-                    add("文字可能截断", "「\(object.label)」的内容超出了文字可用区域。可增大文本框或调小字号。")
+                if object.kind == .text {
+                    if SlideText.isClipped(object) {
+                        add("文字可能截断", "「\(object.label)」的内容超出了文字可用区域。可增大文本框或调小字号。")
+                    }
+                    let finding = fontAudit.inspect(object)
+                    if !finding.unavailable.isEmpty {
+                        add("字体缺失", finding.unavailable.sorted().joined(separator: "、"))
+                    }
+                    if !finding.missing.isEmpty {
+                        let chars = finding.missing.prefix(16).map {
+                            String($0) + " " + $0.unicodeScalars.map { String(format: "U+%04X", $0.value) }.joined(separator: " ")
+                        }
+                        add("中文字符缺字", chars.joined(separator: "、"))
+                    }
+                    if !finding.substituted.isEmpty {
+                        add("中文字符使用替代字体", String(finding.substituted.prefix(24)))
+                    }
                 }
                 return rows
             }
@@ -64,6 +81,7 @@ struct SlideReviewPanel: View {
     let checking: Bool
     let refresh: () -> Void
     let compare: () -> Void
+    let fonts: () -> Void
     let close: () -> Void
     let reveal: (SlideReviewRow) -> Void
 
@@ -77,6 +95,7 @@ struct SlideReviewPanel: View {
                     Text("\(pageCount) 页 · \(rows.count) 项").font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
+                Button("替换字体…", action: fonts)
                 if mode == .preflight {
                     Button("重新检查", action: refresh).disabled(checking)
                 } else {
@@ -92,7 +111,7 @@ struct SlideReviewPanel: View {
             }
             if rows.isEmpty {
                 Text(checking ? "正在检查课件…" : mode == .preflight
-                     ? "未发现文字截断或对象超出画布。" : "导入时未记录需要核对的项目。")
+                     ? "未发现需处理的文字、字体或画布问题。" : "导入时未记录需要核对的项目。")
                     .font(.callout).foregroundStyle(.secondary)
                     .frame(maxHeight: .infinity, alignment: .topLeading)
             } else {

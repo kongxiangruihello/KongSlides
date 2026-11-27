@@ -149,8 +149,17 @@ enum PowerPoint {
     }
 
     private static func geometry(_ object: SlideObject) -> String {
-        """
-        <a:xfrm><a:off x="\(emu(object.x))" y="\(emu(object.y))"/>
+        var transform = ""
+        if let picture = object.pictureAppearance, object.kind == .image {
+            if picture.angle != 0 {
+                let angle = (Int((picture.angle * 60_000).rounded()) % 21_600_000 + 21_600_000) % 21_600_000
+                transform += " rot=\"\(angle)\""
+            }
+            if picture.flipHorizontal { transform += " flipH=\"1\"" }
+            if picture.flipVertical { transform += " flipV=\"1\"" }
+        }
+        return """
+        <a:xfrm\(transform)><a:off x="\(emu(object.x))" y="\(emu(object.y))"/>
         <a:ext cx="\(emu(object.width))" cy="\(emu(object.height))"/></a:xfrm>
         <a:prstGeom prst="rect"><a:avLst/></a:prstGeom>
         """
@@ -186,9 +195,11 @@ enum PowerPoint {
         } else {
             crop = ""
         }
+        let opacity = object.pictureAppearance?.opacity ?? 1
+        let effect = opacity < 1 ? "<a:alphaModFix amt=\"\(Int((opacity * 100_000).rounded()))\"/>" : ""
         return """
         <p:pic><p:nvPicPr><p:cNvPr id="\(id)" name="Image \(id)"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr>
-        <p:blipFill><a:blip r:embed="rId\(relationship)"/>\(crop)<a:stretch><a:fillRect/></a:stretch></p:blipFill>
+        <p:blipFill><a:blip r:embed="rId\(relationship)">\(effect)</a:blip>\(crop)<a:stretch><a:fillRect/></a:stretch></p:blipFill>
         <p:spPr>\(geometry(object))</p:spPr></p:pic>
         """
     }

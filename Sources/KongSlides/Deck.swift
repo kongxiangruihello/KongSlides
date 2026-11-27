@@ -64,6 +64,13 @@ enum SlideDrawing {
             case .image:
                 guard let id = object.imageID, let data = images[id], let image = picture(data) else { continue }
                 context.saveGState()
+                if let appearance = object.pictureAppearance {
+                    context.setAlpha(appearance.opacity)
+                    context.translateBy(x: rect.midX, y: rect.midY)
+                    context.rotate(by: -appearance.clockwiseRadians)
+                    context.scaleBy(x: appearance.flipHorizontal ? -1 : 1, y: appearance.flipVertical ? -1 : 1)
+                    context.translateBy(x: -rect.midX, y: -rect.midY)
+                }
                 context.clip(to: rect)
                 context.draw(image, in: object.pictureCrop?.imageRect(inside: rect) ?? rect)
                 context.restoreGState()

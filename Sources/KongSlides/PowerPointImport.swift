@@ -157,14 +157,16 @@ extension PowerPoint {
                     object.height = slide.objects.isEmpty ? 100 : 140
                     hasGeometry = false
                 }
-                if (transform?.number("rot") ?? 0) != 0 || transform?.value("flipH") == "1" ||
-                    transform?.value("flipV") == "1" {
+                func hasFlip(_ attribute: String) -> Bool {
+                    ["1", "true"].contains(transform?.value(attribute) ?? "")
+                }
+                if name != "pic", (transform?.number("rot") ?? 0) != 0 || hasFlip("flipH") || hasFlip("flipV") {
                     note(.geometry, "「\(label)」的旋转或翻转未保留。", object: object.id)
                 }
 
                 if name == "pic" {
-                    guard let ref = element.child("blipFill")?.child("blip")?
-                        .officeRelationship("embed"),
+                    let blip = element.child("blipFill")?.child("blip")
+                    guard let ref = blip?.officeRelationship("embed"),
                           let imagePath = links[ref]?.path else {
                         note(.image, "「\(label)」没有可读取的嵌入图片。")
                         continue
@@ -184,6 +186,22 @@ extension PowerPoint {
                     }
                     object.kind = .image
                     object.imageID = imageIDs[imagePath]
+                    let angle = (transform?.number("rot") ?? 0) / 60_000
+                    let rawOpacity = blip?.child("alphaModFix")
+                    var opacity = 1.0
+                    if let amount = rawOpacity?.number("amt") {
+                        opacity = min(1, max(0, amount / 100_000))
+                    } else if let percent = rawOpacity?.value("amt"), percent.hasSuffix("%"),
+                              let amount = Double(percent.dropLast()), amount.isFinite {
+                        opacity = min(1, max(0, amount / 100))
+                    }
+                    let normalizedAngle = (angle + 180).truncatingRemainder(dividingBy: 360)
+                    let picture = PictureAppearance(angle: (normalizedAngle + 360).truncatingRemainder(dividingBy: 360) - 180,
+                                                    opacity: opacity, flipHorizontal: hasFlip("flipH"), flipVertical: hasFlip("flipV"))
+                    if picture != PictureAppearance() { object.pictureAppearance = picture }
+                    if blip?.elementChildren.contains(where: { ["alphaBiLevel", "alphaInv", "alphaRepl", "alphaMod"].contains($0.localName ?? "") }) == true {
+                        note(.image, "「\(label)」的特殊透明效果已简化。", object: object.id)
+                    }
                     if !hasGeometry { note(.geometry, "「\(label)」使用了默认位置。", object: object.id) }
                     if let crop = element.child("blipFill")?.child("srcRect") {
                         func edge(_ name: String) -> Double {
