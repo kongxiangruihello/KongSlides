@@ -7,19 +7,27 @@ function Read-XmlPart($name) {
     $entry = $zip.GetEntry($name)
     if ($null -eq $entry) { throw "Missing Open XML part: $name" }
     $reader = [IO.StreamReader]::new($entry.Open())
-    try { return [xml]$reader.ReadToEnd() } finally { $reader.Dispose() }
+    try {
+        $document = [System.Xml.XmlDocument]::new()
+        $document.Load($reader)
+        Write-Output -NoEnumerate $document
+    } finally { $reader.Dispose() }
 }
 try {
     $slide = Read-XmlPart 'ppt/slides/slide1.xml'
     $notes = Read-XmlPart 'ppt/notesSlides/notesSlide1.xml'
-    $ns = [Xml.XmlNamespaceManager]::new($slide.NameTable)
+    $ns = [Xml.XmlNamespaceManager]::new($slide.get_NameTable())
     $ns.AddNamespace('p', 'http://schemas.openxmlformats.org/presentationml/2006/main')
     $ns.AddNamespace('a', 'http://schemas.openxmlformats.org/drawingml/2006/main')
     if (!$slide.SelectSingleNode("//a:ea[@typeface='Microsoft YaHei']", $ns)) { throw 'Missing East Asian font' }
     if (!$slide.SelectSingleNode('//p:grpSp/p:cxnSp/p:nvCxnSpPr/p:cNvCxnSpPr/a:stCxn', $ns)) { throw 'Missing group attachment' }
     if (!$slide.SelectSingleNode("//a:tbl/a:tr/a:tc[@gridSpan='2']", $ns)) { throw 'Missing merged table cell' }
-    if (!$notes.InnerText.Contains('教师讲稿验收')) { throw 'Missing speaker notes' }
+    $notesText = ($notes.SelectNodes("//*[local-name()='t']") | ForEach-Object { $_.get_InnerText() }) -join ''
+    if ($notesText -notlike '*教师讲稿验收*') { throw 'Missing speaker notes' }
     Write-Host 'Windows Open XML check passed: East Asian font, group, attached connector, merged cell and notes.'
+} catch {
+    Write-Host $_.ScriptStackTrace
+    throw
 } finally { $zip.Dispose() }
 
 $officeType = [type]::GetTypeFromProgID('PowerPoint.Application')
