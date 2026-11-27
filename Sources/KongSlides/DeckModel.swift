@@ -158,6 +158,7 @@ struct SlideObject: Codable, Identifiable, Equatable {
     var connector: SlideConnector?
     var decorationSource: DecorationSource?
     var locked: Bool?
+    var groupID: UUID?
 
     var isLocked: Bool { locked == true }
 

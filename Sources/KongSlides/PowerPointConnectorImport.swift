@@ -47,10 +47,6 @@ struct ImportedConnector {
         self.object = object
 
         var warnings: [String] = []
-        let links = element.child("nvCxnSpPr")?.child("cNvCxnSpPr")
-        if links?.child("stCxn") != nil || links?.child("endCxn") != nil {
-            warnings.append("保留了导入时的端点位置，移动相连形状时端点需手动调整。")
-        }
         let customDecoration = ["headEnd", "tailEnd"].contains { name in
             guard let tip = line?.child(name) else { return false }
             return tip.value("type") != "none" && (["w", "len"].contains { tip.value($0).map { $0 != "med" } == true })

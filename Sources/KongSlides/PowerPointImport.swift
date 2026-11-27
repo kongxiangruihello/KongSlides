@@ -138,12 +138,16 @@ extension PowerPoint {
             let hasSlideFooter = objects.elementChildren.contains { $0.placeholderType == "ftr" }
             let layoutFooter = context.layout?.child("cSld")?.child("spTree")?
                 .elementChildren.first { $0.placeholderType == "ftr" }
-            var importedObjects: [(element: XMLElement, coordinates: PowerPointGroup, layer: Layer)] = []
+            var importedObjects: [(element: XMLElement, coordinates: PowerPointGroup, layer: Layer, group: UUID?)] = []
             for layer in layers {
                 let objects = try PowerPointGroup.objects(in: layer.tree) { note($0, $1) }
-                importedObjects += objects.map { ($0.element, $0.coordinates, layer) }
+                importedObjects += objects.map { ($0.element, $0.coordinates, layer, $0.group) }
             }
-            for (element, coordinates, layer) in importedObjects {
+            var shapesBySourceID: [String: UUID] = [:]
+            var connectorTargets: [(UUID, String?, Int?, String?, Int?)] = []
+            for (element, coordinates, layer, group) in importedObjects {
+                let prefix = layer.source?.rawValue ?? "slide"
+                func scopedID(_ raw: String?) -> String? { raw.map { prefix + ":" + $0 } }
                 let isInheritedFooter = layer.source != nil && element.placeholderType == "ftr"
                 if layer.source != nil, element.placeholder != nil {
                     guard isInheritedFooter, !hasSlideFooter, ["1", "true"].contains(inheritedFooter ?? ""),
@@ -152,6 +156,12 @@ extension PowerPoint {
                 func append(_ object: SlideObject) {
                     var editable = object
                     editable.decorationSource = layer.source
+                    editable.groupID = group
+                    if editable.kind == .rectangle,
+                       element.child("spPr")?.child("prstGeom")?.value("prst") == "rect",
+                       let id = scopedID(element.powerPointObjectID) {
+                        shapesBySourceID[id] = editable.id
+                    }
                     slide.objects.append(editable)
                 }
 
@@ -162,6 +172,14 @@ extension PowerPoint {
                 if name == "cxnSp" || (name == "sp" && ["line", "lineInv"].contains(preset ?? "")) {
                     if let imported = ImportedConnector(element, context: context, unit: factor, coordinates: coordinates) {
                         append(imported.object)
+                        let links = element.child("nvCxnSpPr")?.child("cNvCxnSpPr")
+                        let start = links?.child("stCxn")
+                        let end = links?.child("endCxn")
+                        if start != nil || end != nil {
+                            connectorTargets.append((imported.object.id, scopedID(start?.value("id")),
+                                start?.value("idx").flatMap(Int.init), scopedID(end?.value("id")),
+                                end?.value("idx").flatMap(Int.init)))
+                        }
                         for warning in imported.warnings {
                             note(.geometry, "连接线「\(label)」\(warning)", object: imported.object.id)
                         }
@@ -328,6 +346,24 @@ extension PowerPoint {
                     append(object)
                 }
             }
+            let connectorIndices = connectorTargets.isEmpty ? [:] :
+                Dictionary(uniqueKeysWithValues: slide.objects.enumerated().map { ($0.element.id, $0.offset) })
+            for (connector, startID, startEdge, endID, endEdge) in connectorTargets {
+                guard let index = connectorIndices[connector] else { continue }
+                func attachment(_ key: String?, _ raw: Int?) -> SlideConnector.Attachment? {
+                    guard let key, let target = shapesBySourceID[key],
+                          let raw, let edge = SlideConnector.Attachment.Edge(rawValue: raw) else { return nil }
+                    return .init(objectID: target, edge: edge)
+                }
+                let start = attachment(startID, startEdge)
+                let end = attachment(endID, endEdge)
+                slide.objects[index].connector?.startAttachment = start
+                slide.objects[index].connector?.endAttachment = end
+                if (startID != nil && start == nil) || (endID != nil && end == nil) {
+                    note(.geometry, "部分连接端点无法绑定到可编辑矩形，已保留为自由端点。", object: connector)
+                }
+            }
+            slide.resolveConnectorAttachments()
             if xml.child("timing") != nil || xml.child("transition") != nil {
                 note(.timing, "保留静态页面内容。")
             }

@@ -70,6 +70,15 @@ final class EditorFileSession {
     func edit(_ value: SlidesDocument) {
         guard document.deck != value.deck else { return }
         let previous = document
+        var value = value
+        for index in value.deck.slides.indices where value.deck.slides[index].objects.contains(where: {
+            $0.connector?.startAttachment != nil || $0.connector?.endAttachment != nil
+        }) {
+            if !previous.deck.slides.indices.contains(index) ||
+                previous.deck.slides[index].objects != value.deck.slides[index].objects {
+                value.deck.slides[index].resolveConnectorAttachments()
+            }
+        }
         undoManager.registerUndo(withTarget: self) { session in
             MainActor.assumeIsolated { session.edit(previous) }
         }

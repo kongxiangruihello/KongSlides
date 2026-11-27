@@ -591,6 +591,34 @@ struct EditorView: View {
         }
     }
 
+    private func chooseGroup(_ group: UUID, primary: UUID) {
+        chooseObject(primary, extend: false)
+        additionalObjects = Set(slide.objects.filter { $0.groupID == group && !$0.isLocked && $0.id != primary }.map(\.id))
+    }
+
+    private func regroupObjects() {
+        let ids = selectedObjects
+        let group = UUID()
+        var updated = slide
+        guard let first = updated.objects.firstIndex(where: { ids.contains($0.id) }) else { return }
+        let members = updated.objects.filter { ids.contains($0.id) }.map { object -> SlideObject in
+            var copy = object
+            copy.groupID = group
+            return copy
+        }
+        updated.objects.removeAll { ids.contains($0.id) }
+        updated.objects.insert(contentsOf: members, at: first)
+        document.deck.slides[index] = updated
+    }
+
+    private func ungroup(_ group: UUID) {
+        var updated = slide
+        for index in updated.objects.indices where updated.objects[index].groupID == group {
+            updated.objects[index].groupID = nil
+        }
+        document.deck.slides[index] = updated
+    }
+
     private func objectMarqueeGesture(scale: CGFloat) -> some Gesture {
         func rect(_ drag: DragGesture.Value) -> CGRect {
             CGRect(x: min(drag.startLocation.x, drag.location.x) / scale,
@@ -608,7 +636,10 @@ struct EditorView: View {
     }
 
     private func moveObjects(dragged id: UUID, by delta: CGSize) {
-        if !selectedObjects.contains(id) { chooseObject(id, extend: false) }
+        if !selectedObjects.contains(id) {
+            if let group = slide.objects.first(where: { $0.id == id })?.groupID { chooseGroup(group, primary: id) }
+            else { chooseObject(id, extend: false) }
+        }
         let selected = selectedObjects
         let members = slide.objects.filter { selected.contains($0.id) }
         guard let left = members.map(\.x).min(), let right = members.map(\.x).max(),
@@ -676,7 +707,13 @@ struct EditorView: View {
         } else {
             ObjectHitArea(object: object, selected: objectID == object.id || selectedObjects.contains(object.id), scale: scale,
                           slideBackground: slide.background, images: deck.images, canvas: deck.pageCanvas,
-                          select: { chooseObject(object.id) },
+                          select: {
+                              if let group = object.groupID, !NSEvent.modifierFlags.contains(.shift) {
+                                  chooseGroup(group, primary: object.id)
+                              } else {
+                                  chooseObject(object.id)
+                              }
+                          },
                           edit: {
                               chooseObject(object.id, extend: false)
                               if object.kind == .text { editingID = object.id }
@@ -737,6 +774,12 @@ struct EditorView: View {
                 Divider()
                 if selectedObjects.count > 1 {
                     Text("已选 \(selectedObjects.count) 个对象").font(.headline)
+                    if let selection, let group = slide.objects[selection].groupID,
+                       slide.objects.filter({ selectedObjects.contains($0.id) }).allSatisfy({ $0.groupID == group }) {
+                        Button("解散组合") { ungroup(group) }
+                    } else {
+                        Button("组合对象") { regroupObjects() }
+                    }
                     Menu("对齐与分布") {
                         Button("左对齐") { alignObjects(horizontal: true) }
                         Button("上对齐") { alignObjects(horizontal: false) }
@@ -746,6 +789,10 @@ struct EditorView: View {
                 } else if let selection {
                     let object = slide.objects[selection]
                     Text(object.label).font(.headline).lineLimit(2)
+                    if let group = object.groupID {
+                        Button("选择整个组合") { chooseGroup(group, primary: object.id) }
+                        Button("解散组合") { ungroup(group) }
+                    }
                     if let source = object.decorationSource {
                         Text(source.title).font(.caption).foregroundStyle(.secondary)
                     }
@@ -852,6 +899,8 @@ struct EditorView: View {
             Picker("线型", selection: field(\.dash)) {
                 ForEach(SlideConnector.Dash.allCases, id: \.self) { Text($0.title).tag($0) }
             }
+            connectorAttachmentPicker(object, start: true)
+            connectorAttachmentPicker(object, start: false)
             TextField("线宽", value: field(\.weight), format: .number.precision(.fractionLength(0...2)))
                 .help("线宽为 0.25 至 96 磅")
             Grid(alignment: .leading, horizontalSpacing: 8) {
@@ -863,6 +912,30 @@ struct EditorView: View {
                     connectorEndpoint("终点 X", object: object, start: false, horizontal: true)
                     connectorEndpoint("终点 Y", object: object, start: false, horizontal: false)
                 }
+            }
+        }
+    }
+
+    private func connectorAttachmentPicker(_ object: SlideObject, start: Bool) -> some View {
+        let targets = Array(slide.objects.enumerated().filter { $0.element.kind == .rectangle })
+        let field = objectBinding(object.id, \.connector, fallback: nil)
+        let selection = Binding<UUID?>(get: {
+            let line = field.wrappedValue
+            return (start ? line?.startAttachment : line?.endAttachment)?.objectID
+        }, set: { id in
+            guard var line = field.wrappedValue,
+                  let current = slide.objects.first(where: { $0.id == object.id }) else { return }
+            let ends = line.endpoints(in: current.frame)
+            let link = targets.first(where: { $0.element.id == id }).map {
+                SlideConnector.Attachment.nearest(on: $0.element, to: start ? ends.start : ends.end)
+            }
+            if start { line.startAttachment = link } else { line.endAttachment = link }
+            field.wrappedValue = line
+        })
+        return Picker(start ? "起点连接" : "终点连接", selection: selection) {
+            Text("自由端点").tag(nil as UUID?)
+            ForEach(targets, id: \.element.id) { item in
+                Text("矩形 · 对象 \(item.offset + 1)").tag(Optional(item.element.id))
             }
         }
     }
@@ -883,9 +956,16 @@ struct EditorView: View {
                 var ends = line.endpoints(in: current.frame)
                 let axis: WritableKeyPath<CGPoint, CGFloat> = horizontal ? \.x : \.y
                 if start { ends.start[keyPath: axis] = value } else { ends.end[keyPath: axis] = value }
-                guard var updated = SlideConnector.object(from: ends.start, to: ends.end, style: line, color: current.color) else { return }
-                updated.id = current.id
-                document.deck.slides[index].objects[position] = updated
+                var style = line
+                if start { style.startAttachment = nil } else { style.endAttachment = nil }
+                guard let updated = SlideConnector.object(from: ends.start, to: ends.end, style: style, color: current.color) else { return }
+                var next = current
+                next.x = updated.x
+                next.y = updated.y
+                next.width = updated.width
+                next.height = updated.height
+                next.connector = updated.connector
+                document.deck.slides[index].objects[position] = next
             }
         )
         return VStack(alignment: .leading, spacing: 2) {

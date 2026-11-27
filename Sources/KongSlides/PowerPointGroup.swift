@@ -45,9 +45,9 @@ struct PowerPointGroup {
     }
 
     static func objects(in tree: XMLElement, report: (ImportDiagnostic.Kind, String) -> Void) throws
-        -> [(element: XMLElement, coordinates: Self)] {
-        var result: [(XMLElement, Self)] = []
-        func visit(_ tree: XMLElement, coordinates: Self, depth: Int) throws {
+        -> [(element: XMLElement, coordinates: Self, group: UUID?)] {
+        var result: [(XMLElement, Self, UUID?)] = []
+        func visit(_ tree: XMLElement, coordinates: Self, depth: Int, group: UUID?) throws {
             for child in tree.elementChildren {
                 try Task.checkCancellation()
                 switch child.localName {
@@ -55,6 +55,7 @@ struct PowerPointGroup {
                     continue
                 case "grpSp":
                     let label = child.powerPointLabel
+                    let group = group ?? UUID()
                     guard depth < 32 else {
                         report(.unsupported, "组合「\(label)」嵌套层级过深，剩余对象未转换。")
                         continue
@@ -62,7 +63,7 @@ struct PowerPointGroup {
                     guard let transform = child.child("grpSpPr")?.child("xfrm"),
                           let next = coordinates.composed(with: transform) else {
                         report(.geometry, "组合「\(label)」的定位信息不完整，子对象按原有局部坐标导入。")
-                        try visit(child, coordinates: coordinates, depth: depth + 1)
+                        try visit(child, coordinates: coordinates, depth: depth + 1, group: group)
                         continue
                     }
                     if transform.hasPowerPointReorientation {
@@ -73,18 +74,22 @@ struct PowerPointGroup {
                     if abs(horizontal - vertical) > max(horizontal, vertical) * 0.001 {
                         report(.text, "组合「\(label)」横纵缩放不一致，文字按较小比例等比缩放。")
                     }
-                    try visit(child, coordinates: next, depth: depth + 1)
+                    try visit(child, coordinates: next, depth: depth + 1, group: group)
                 default:
-                    result.append((child, coordinates))
+                    result.append((child, coordinates, group))
                 }
             }
         }
-        try visit(tree, coordinates: Self(), depth: 0)
+        try visit(tree, coordinates: Self(), depth: 0, group: nil)
         return result
     }
 }
 
 extension XMLElement {
+    var powerPointObjectID: String? {
+        elementChildren.first { $0.localName?.hasPrefix("nv") == true }?.child("cNvPr")?.value("id")
+    }
+
     var powerPointLabel: String {
         let name = elementChildren.first { $0.localName?.hasPrefix("nv") == true }?.child("cNvPr")?.value("name")
         return String((name.flatMap { $0.isEmpty ? nil : $0 } ?? localName ?? "对象").prefix(60))

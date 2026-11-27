@@ -87,9 +87,24 @@ struct SlideClipboard: Codable {
             var copy = slide
             copy.id = UUID()
             copy.importReport = nil
+            var groups: [UUID: UUID] = [:]
+            let ids = Dictionary(uniqueKeysWithValues: slide.objects.map { ($0.id, UUID()) })
             copy.objects = slide.objects.map { object in
                 var result = source.fitting(object, into: target)
-                result.id = UUID()
+                result.id = ids[object.id] ?? UUID()
+                func copiedAttachment(_ link: SlideConnector.Attachment?) -> SlideConnector.Attachment? {
+                    guard let link, let id = ids[link.objectID] else { return nil }
+                    return .init(objectID: id, edge: link.edge)
+                }
+                if let line = result.connector {
+                    result.connector?.startAttachment = copiedAttachment(line.startAttachment)
+                    result.connector?.endAttachment = copiedAttachment(line.endAttachment)
+                }
+                if let group = object.groupID {
+                    let copy = groups[group] ?? UUID()
+                    groups[group] = copy
+                    result.groupID = copy
+                }
                 if let asset = object.imageID { result.imageID = assetMap[asset] ?? asset }
                 return result
             }

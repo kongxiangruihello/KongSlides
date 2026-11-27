@@ -80,7 +80,9 @@ enum PowerPoint {
             Part("ppt/notesMasters/_rels/notesMaster1.xml.rels", relations([("theme", "../theme/theme1.xml")])),
             Part("ppt/theme/theme1.xml", theme, type: "theme")
         ]
-        for (index, slide) in deck.slides.enumerated() {
+        for (index, sourceSlide) in deck.slides.enumerated() {
+            var slide = sourceSlide
+            slide.resolveConnectorAttachments()
             let number = index + 1
             var links = [("slideLayout", "../slideLayouts/slideLayout1.xml")]
             if !slide.speakerNotes.isEmpty {
@@ -91,24 +93,52 @@ enum PowerPoint {
                                            ("slide", "../slides/slide\(number).xml")])))
             }
             var shapes = ""
+            var group: UUID?
+            var members = ""
+            var groupBounds: CGRect?
+            var groupNumber = slide.objects.count + 2
+            let shapeIDs = Dictionary(uniqueKeysWithValues: slide.objects.enumerated().map { ($0.element.id, $0.offset + 2) })
+            func flushGroup() {
+                if let bounds = groupBounds, group != nil, !members.isEmpty {
+                    let x = emu(bounds.minX), y = emu(bounds.minY)
+                    let width = emu(bounds.width), height = emu(bounds.height)
+                    shapes += """
+                    <p:grpSp><p:nvGrpSpPr><p:cNvPr id="\(groupNumber)" name="Group \(groupNumber)"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
+                    <p:grpSpPr><a:xfrm><a:off x="\(x)" y="\(y)"/><a:ext cx="\(width)" cy="\(height)"/>
+                    <a:chOff x="\(x)" y="\(y)"/><a:chExt cx="\(width)" cy="\(height)"/></a:xfrm></p:grpSpPr>
+                    \(members)</p:grpSp>
+                    """
+                    groupNumber += 1
+                } else {
+                    shapes += members
+                }
+                members = ""
+                groupBounds = nil
+            }
             for (index, object) in slide.objects.enumerated() {
+                if group != object.groupID {
+                    flushGroup()
+                    group = object.groupID
+                }
+                if group != nil { groupBounds = groupBounds?.union(object.frame) ?? object.frame }
                 let id = index + 2
                 switch object.kind {
                 case .text:
-                    shapes += textBox(object, id: id)
+                    members += textBox(object, id: id)
                 case .rectangle:
-                    shapes += rectangle(object, id: id)
+                    members += rectangle(object, id: id)
                 case .connector:
-                    if let line = object.connector { shapes += connectorXML(line, object: object, id: id) }
+                    if let line = object.connector { members += connectorXML(line, object: object, id: id, shapeIDs: shapeIDs) }
                 case .table:
-                    if let table = object.table { shapes += tableXML(table, object: object, id: id) }
+                    if let table = object.table { members += tableXML(table, object: object, id: id) }
                 case .image:
                     if let imageID = object.imageID {
                         links.append(("image", "../media/\(imageID.uuidString).png"))
-                        shapes += picture(object, id: id, relationship: links.count)
+                        members += picture(object, id: id, relationship: links.count)
                     }
                 }
             }
+            flushGroup()
             let visibility = slide.isBackup ? " show=\"0\"" : ""
             let slideXML = """
             <p:sld \(namespace)\(visibility)><p:cSld>
@@ -189,7 +219,7 @@ enum PowerPoint {
         """
     }
 
-    private static func connectorXML(_ line: SlideConnector, object: SlideObject, id: Int) -> String {
+    private static func connectorXML(_ line: SlideConnector, object: SlideObject, id: Int, shapeIDs: [UUID: Int]) -> String {
         let (start, end) = line.endpoints(in: object.frame)
         let startX = emu(start.x), startY = emu(start.y)
         var endX = emu(end.x)
@@ -198,8 +228,13 @@ enum PowerPoint {
         if startX == endX && startY == endY { endX += 1 }
         let flipH = startX > endX ? " flipH=\"1\"" : ""
         let flipV = startY > endY ? " flipV=\"1\"" : ""
+        func connection(_ attachment: SlideConnector.Attachment?, tag: String) -> String {
+            guard let attachment, let target = shapeIDs[attachment.objectID] else { return "" }
+            return "<a:\(tag) id=\"\(target)\" idx=\"\(attachment.edge.rawValue)\"/>"
+        }
+        let links = connection(line.startAttachment, tag: "stCxn") + connection(line.endAttachment, tag: "endCxn")
         return """
-        <p:cxnSp><p:nvCxnSpPr><p:cNvPr id="\(id)" name="Connector \(id)"/><p:cNvCxnSpPr/><p:nvPr/></p:nvCxnSpPr>
+        <p:cxnSp><p:nvCxnSpPr><p:cNvPr id="\(id)" name="Connector \(id)"/><p:cNvCxnSpPr>\(links)</p:cNvCxnSpPr><p:nvPr/></p:nvCxnSpPr>
         <p:spPr><a:xfrm\(flipH)\(flipV)><a:off x="\(min(startX, endX))" y="\(min(startY, endY))"/>
         <a:ext cx="\(abs(endX - startX))" cy="\(abs(endY - startY))"/></a:xfrm>
         <a:prstGeom prst="straightConnector1"><a:avLst/></a:prstGeom>
