@@ -73,6 +73,7 @@ final class EditorFileSession {
     var homeAction: HomeActionRequest?
     @ObservationIgnored private var storedPreviewTask: Task<Void, Never>?
 
+    @ObservationIgnored weak var editorWindow: NSWindow?
     @ObservationIgnored let undoManager = UndoManager()
     @ObservationIgnored var statusChanged: (() -> Void)?
     @ObservationIgnored private var savedDeck: Deck?
@@ -350,6 +351,7 @@ final class EditorFileSession {
                          source: URL? = nil, isClosing: Bool = false) {
         undoManager.removeAllActions()
         document = SlidesDocument(deck: deck)
+        exportReceipt = nil
         fileURL = url
         sourceURL = source
         hasDocument = !isClosing

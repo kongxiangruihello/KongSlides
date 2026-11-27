@@ -282,7 +282,7 @@ struct Slide: Codable, Identifiable, Equatable {
 
     var title: String {
         let title = objects.lazy.filter { $0.kind == .text && $0.decorationSource == nil && $0.isCourseFooter != true }
-            .compactMap { $0.text.split(separator: "\n").first.map { String($0.prefix(26)) } }.first
+            .map { $0.text.split(separator: "\n").first.map { String($0.prefix(26)) } ?? "文本框" }.first
         return title ?? "空白页"
     }
 

@@ -62,6 +62,7 @@ struct EditorView: View {
     @State private var classroomSheet: ClassroomToolSheet?
     @State private var exportReceipt: ExportReceipt?
     @State private var detailedReceipt: ExportReceipt?
+    @State private var exportBusy = false
     @State private var slideFilter = ClassroomSlideFilter.all
     @State private var workspaceLayout = ClassroomWorkspaceLayout.full
     @State private var styleBrush: SlideTextRun?
@@ -72,6 +73,7 @@ struct EditorView: View {
     @State private var canvasSnap: CanvasSnap?
     @State private var draggingPage: UUID?
     @State private var pageDropTarget: UUID?
+    @State private var edgeScrollAnchor: UUID?
     @State private var edgeScroll: Task<Void, Never>?
     @State private var selectedPageIDs: Set<UUID> = []
     @State private var pageSelectionAnchor: UUID?
@@ -149,7 +151,9 @@ struct EditorView: View {
         return object.kind == .text && !object.isLocked ? object : nil
     }
 
-    var body: some View {
+    var body: some View { editorAlerts }
+
+    private var editorSurface: some View {
         VStack(spacing: 0) {
             controls
             Divider()
@@ -228,6 +232,10 @@ struct EditorView: View {
             return true
         }
         .onChange(of: session.pageJumpRequest) { pageJumpSheet = true }
+    }
+
+    private var editorNavigation: some View {
+        editorSurface
         .sheet(isPresented: $rehearsalSheet) {
             VStack(alignment: .leading, spacing: 10) {
                 Text("章节排练记录").font(.headline)
@@ -291,6 +299,10 @@ struct EditorView: View {
                 } catch {}
             }
         }
+    }
+
+    private var editorDocuments: some View {
+        editorNavigation
         .sheet(isPresented: $recoverySheet) {
             RecoveryBrowser { original, name in
                 var copy = original
@@ -323,6 +335,10 @@ struct EditorView: View {
                 }
             }
         }
+    }
+
+    private var editorSheets: some View {
+        editorDocuments
         .sheet(item: $savedSnapshot) { snapshot in
             DeckSnapshotView(snapshot: snapshot, current: deck) { selection, notesOnly in
                 do {
@@ -368,6 +384,10 @@ struct EditorView: View {
                 exportReceipt = receipt
             }
         }
+    }
+
+    private var editorAlerts: some View {
+        editorSheets
         .alert("重命名对象", isPresented: Binding(get: { renameTarget != nil }, set: { if !$0 { renameTarget = nil } })) {
             TextField("名称", text: $objectName)
             Button("取消", role: .cancel) { renameTarget = nil }
@@ -521,7 +541,7 @@ struct EditorView: View {
                 Button("教室兼容 PPTX 副本…") { classroomSheet = .compatibility }
             } label: { Label("导出", systemImage: "square.and.arrow.up") }
             .fixedSize()
-            .disabled(importing || session.opening || session.saving)
+            .disabled(importing || session.opening || session.saving || exportBusy)
             .accessibilityIdentifier("export-menu")
             Menu {
                 if let file = session.currentDocumentURL {
@@ -699,7 +719,10 @@ struct EditorView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .modifier(ClassroomRowDrag(enabled: canReorderRows, highlighted: pageDropTarget == row.id,
                                     provider: { startPageDrag(row.id) },
-                                    entered: { pageDropTarget = $0 ? row.id : nil },
+                                    entered: {
+                                        if $0 { pageDropTarget = row.id; edgeScrollAnchor = row.id }
+                                        else if pageDropTarget == row.id { pageDropTarget = nil }
+                                    },
                                     dropped: { dropPage(before: row.id) }))
         .contextMenu {
             let pages = selectedPages.contains(row.id) ? selectedPages : [row.id]
@@ -987,6 +1010,10 @@ struct EditorView: View {
             HStack {
                 Label("逐字讲稿", systemImage: "note.text").font(.headline)
                 Text("第 \(index + 1) 页").font(.caption).foregroundStyle(.secondary)
+                if workspaceLayout == .notes {
+                    Button("上一页") { stepEditorPage(-1) }.disabled(editorPage(-1) == nil)
+                    Button("下一页") { stepEditorPage(1) }.disabled(editorPage(1) == nil)
+                }
                 Picker("讲解标记", selection: slideBinding(\.teachingCue)) {
                     Text("无").tag(nil as Slide.TeachingCue?)
                     ForEach(Slide.TeachingCue.allCases) { cue in Text(cue.rawValue).tag(Optional(cue)) }
@@ -1969,8 +1996,8 @@ struct EditorView: View {
                 let result = try await Task.detached(priority: .userInitiated) {
                     try TeachingPDF.chapterPackage(exportDeck, title: name, in: location, includeEditable: section == nil)
                 }.value
-                NSWorkspace.shared.activateFileViewerSelecting([result])
-            } catch { linkedError = "无法导出授课资料。\n\(error.localizedDescription)" }
+                exportReceipt = .init(url: result)
+            } catch { exportReceipt = .init(url: location, success: false, report: [error.localizedDescription]) }
         }
     }
 
@@ -2022,7 +2049,9 @@ struct EditorView: View {
         case .batch:
             let pages = selectedPages
             let names = deck.slides.enumerated().compactMap { index, page in
-                pages.contains(page.id) ? "\(index + 1)  \(page.title)" : nil
+                guard pages.contains(page.id) else { return nil }
+                let labels = page.objects.filter { $0.kind == .text && !$0.isLocked && $0.decorationSource == nil }.map(\.label)
+                return "第 \(index + 1) 页 · " + (labels.isEmpty ? page.title : labels.joined(separator: "、"))
             }
             BatchSlideStyleView(pages: names) { size, color, background, footer in
                 var changed = deck
@@ -2048,12 +2077,12 @@ struct EditorView: View {
             }
         case .compatibility:
             ClassroomCompatibilityView(deck: deck) { fonts, replacement, pages in
-                Task { @MainActor in exportCompatibility(fonts: fonts, replacement: replacement, flattened: pages) }
+                Task { @MainActor in await exportCompatibility(fonts: fonts, replacement: replacement, flattened: pages) }
             }
         case .studentTwo, .studentThree:
             let format: TeachingPDF.Format = tool == .studentTwo ? .studentTwo : .studentThree
             StudentHandoutPreview(deck: deck, format: format) { data in
-                Task { @MainActor in saveHandout(data, title: format.label) }
+                Task { @MainActor in await saveHandout(data, title: format.label) }
             }
         case .benchmark: PerformanceBenchmarkView(deck: deck)
         case .toolbar: FormattingToolbarSettings()
@@ -2082,7 +2111,7 @@ struct EditorView: View {
                     run.bold = paint.bold
                     run.color = paint.color
                     run.fontName = paint.fontName
-                    run.usesSystemFont = paint.usesSystemFont
+                    run.usesSystemFont = !ranges.isEmpty && paint.fontName == nil ? true : paint.usesSystemFont
                     run.baseline = paint.baseline
                     run.characterStyle = paint.characterStyle
                 }
@@ -2211,6 +2240,7 @@ struct EditorView: View {
 
     private func startPageDrag(_ id: UUID) -> NSItemProvider {
         draggingPage = id
+        edgeScrollAnchor = id
         let provider = NSItemProvider()
         provider.registerDataRepresentation(forTypeIdentifier: classroomSlideDragType, visibility: .ownProcess) { complete in
             complete(Data(id.uuidString.utf8), nil)
@@ -2233,6 +2263,7 @@ struct EditorView: View {
         edgeScroll = nil
         draggingPage = nil
         pageDropTarget = nil
+        edgeScrollAnchor = nil
     }
 
     private func scrollEdge(_ side: VerticalEdge, using proxy: ScrollViewProxy) -> some View {
@@ -2243,46 +2274,59 @@ struct EditorView: View {
                 guard near, let draggingPage else { return }
                 let direction = side == .top ? -1 : 1
                 let pages = deck.slides.map(\.id)
-                guard var cursor = pages.firstIndex(of: pageDropTarget ?? draggingPage) else { return }
+                guard var cursor = pages.firstIndex(of: edgeScrollAnchor ?? draggingPage) else { return }
                 edgeScroll = Task { @MainActor in
                     while !Task.isCancelled {
                         let next = cursor + direction
                         guard pages.indices.contains(next) else { return }
                         cursor = next
+                        edgeScrollAnchor = pages[cursor]
                         withAnimation(.linear(duration: 0.13)) { proxy.scrollTo(pages[cursor], anchor: side == .top ? .top : .bottom) }
                         try? await Task.sleep(for: .milliseconds(155))
                     }
                 }
-            }, dropped: { stopPageDrag(); return false }))
+            }, dropped: {
+                guard let edgeScrollAnchor else { stopPageDrag(); return false }
+                return dropPage(before: edgeScrollAnchor)
+            }))
             .accessibilityHidden(true)
     }
 
-    private func exportTarget(format: UTType, name: String) -> URL? {
+    private func exportTarget(format: UTType, name: String) async -> URL? {
+        guard let window = session.editorWindow, !exportBusy, !session.saving else { return nil }
+        exportBusy = true
+        defer { exportBusy = false }
         let panel = NSSavePanel()
         panel.allowedContentTypes = [format]
         panel.nameFieldStringValue = name
         panel.directoryURL = session.currentDocumentURL?.deletingLastPathComponent()
-        return panel.runModal() == .OK ? panel.url : nil
+        let response = await withCheckedContinuation { continuation in
+            panel.beginSheetModal(for: window) { continuation.resume(returning: $0) }
+        }
+        return response == .OK ? panel.url : nil
     }
 
     private func exportSelected(_ ids: Set<UUID>, format: ClassroomExportFormat) {
         let copy = deck.selectingPages(ids)
-        guard !copy.slides.isEmpty, let url = exportTarget(format: format.contentType, name: session.name + "-选中页") else { return }
-        writeExport(at: url) {
-            switch format {
-            case .powerPoint:
-                try PowerPoint.write(copy, to: url)
-                return ClassroomExport.checkPowerPoint(copy, at: url)
-            case .projection:
-                try SlideDrawing.pdf(copy, includeBackups: true, to: url)
-                return []
+        guard !copy.slides.isEmpty else { return }
+        Task { @MainActor in
+            guard let url = await exportTarget(format: format.contentType, name: session.name + "-选中页") else { return }
+            writeExport(at: url) {
+                switch format {
+                case .powerPoint:
+                    try PowerPoint.write(copy, to: url)
+                    return ClassroomExport.checkPowerPoint(copy, at: url)
+                case .projection:
+                    try SlideDrawing.pdf(copy, includeBackups: true, to: url)
+                    return []
+                }
             }
         }
     }
 
-    private func exportCompatibility(fonts: [String], replacement: String?, flattened: Set<UUID>) {
-        guard let url = exportTarget(format: .slidePowerPoint, name: session.name + "-教室兼容副本") else { return }
+    private func exportCompatibility(fonts: [String], replacement: String?, flattened: Set<UUID>) async {
         let input = deck
+        guard let url = await exportTarget(format: .slidePowerPoint, name: session.name + "-教室兼容副本") else { return }
         writeExport(at: url) {
             let copy = try ClassroomExport.compatibilityCopy(input, sources: fonts, replacement: replacement, flatten: flattened)
             try PowerPoint.write(copy, to: url)
@@ -2290,8 +2334,8 @@ struct EditorView: View {
         }
     }
 
-    private func saveHandout(_ data: Data, title: String) {
-        guard let url = exportTarget(format: .pdf, name: session.name + "-" + title) else { return }
+    private func saveHandout(_ data: Data, title: String) async {
+        guard let url = await exportTarget(format: .pdf, name: session.name + "-" + title) else { return }
         writeExport(at: url) {
             try data.write(to: url, options: .atomic)
             return []
@@ -2299,7 +2343,10 @@ struct EditorView: View {
     }
 
     private func writeExport(at url: URL, _ operation: @escaping () throws -> [String]) {
+        guard !exportBusy else { return }
+        exportBusy = true
         Task { @MainActor in
+            defer { exportBusy = false }
             do {
                 let report = try await Task.detached(priority: .userInitiated) {
                     let scoped = url.startAccessingSecurityScopedResource()

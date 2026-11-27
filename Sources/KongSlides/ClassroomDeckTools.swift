@@ -35,6 +35,7 @@ struct DeckTextMatch: Identifiable {
         let page: UUID
         let object: UUID?
         let field: DeckTextField
+        var cell: String?
         let range: NSRange
     }
 
@@ -49,7 +50,7 @@ extension Deck {
         guard !query.isEmpty else { return [] }
         return slides.enumerated().flatMap { index, slide -> [DeckTextMatch] in
             guard pages.contains(slide.id) else { return [] }
-            func results(_ value: String, field: DeckTextField, object: UUID? = nil) -> [DeckTextMatch] {
+            func results(_ value: String, field: DeckTextField, object: UUID? = nil, cell: String? = nil) -> [DeckTextMatch] {
                 guard fields.contains(field) else { return [] }
                 let source = value as NSString
                 var offset = 0
@@ -57,12 +58,12 @@ extension Deck {
                 while offset < source.length {
                     let range = source.range(of: query, options: .caseInsensitive,
                                              range: NSRange(location: offset, length: source.length - offset))
-                    guard range.location != NSNotFound else { break }
+                    guard range.location != NSNotFound, range.length > 0 else { break }
                     let low = max(0, range.location - 18)
                     let high = min(source.length, NSMaxRange(range) + 24)
                     let snippet = source.substring(with: source.rangeOfComposedCharacterSequences(
                         for: NSRange(location: low, length: high - low)))
-                    matches.append(.init(id: .init(page: slide.id, object: object, field: field, range: range),
+                    matches.append(.init(id: .init(page: slide.id, object: object, field: field, cell: cell, range: range),
                                          number: index + 1, snippet: snippet,
                                          original: source.substring(with: range)))
                     offset = NSMaxRange(range)
@@ -70,8 +71,11 @@ extension Deck {
                 return matches
             }
             return results(slide.section, field: .section) + results(slide.speakerNotes, field: .notes) +
-                slide.objects.filter { $0.kind == .text && !$0.isLocked }.flatMap {
-                    results($0.text, field: .body, object: $0.id)
+                slide.objects.filter { !$0.isLocked }.flatMap { object in
+                    if let table = object.table {
+                        return table.cells.flatMap { results($0.text, field: .body, object: object.id, cell: $0.id) }
+                    }
+                    return object.kind == .text ? results(object.text, field: .body, object: object.id) : []
                 }
         }
     }
@@ -89,9 +93,14 @@ extension Deck {
                 }
                 switch match.id.field {
                 case .body:
-                    guard let object = slides[index].objects.firstIndex(where: { $0.id == match.id.object && !$0.isLocked }),
-                          let value = updated(slides[index].objects[object].text) else { continue }
-                    slides[index].objects[object].replaceText(with: value)
+                    guard let object = slides[index].objects.firstIndex(where: { $0.id == match.id.object && !$0.isLocked }) else { continue }
+                    if let cellID = match.id.cell, var table = slides[index].objects[object].table,
+                       let cell = table.cells.firstIndex(where: { $0.id == cellID }), let value = updated(table.cells[cell].text) {
+                        table.cells[cell].replaceText(with: value)
+                        slides[index].objects[object].table = table
+                    } else if match.id.cell == nil, let value = updated(slides[index].objects[object].text) {
+                        slides[index].objects[object].replaceText(with: value)
+                    }
                 case .notes:
                     if let value = updated(slides[index].speakerNotes) { slides[index].speakerNotes = value }
                 case .section:
@@ -229,8 +238,24 @@ struct CanvasSnap {
             }
             return best
         }
-        let x = nearest([candidate.minX, candidate.midX, candidate.maxX], to: anchors.flatMap { [$0.minX, $0.midX, $0.maxX] })
-        let y = nearest([candidate.minY, candidate.midY, candidate.maxY], to: anchors.flatMap { [$0.minY, $0.midY, $0.maxY] })
+        func gaps(start: (CGRect) -> CGFloat, end: (CGRect) -> CGFloat, size: CGFloat) -> [CGFloat] {
+            let sorted = anchors.sorted { start($0) < start($1) }
+            return zip(sorted, sorted.dropFirst()).flatMap { first, second -> [CGFloat] in
+                let gap = start(second) - end(first)
+                guard gap >= 0 else { return [] }
+                let before = start(first) - gap - size / 2
+                let after = end(second) + gap + size / 2
+                return gap >= size ? [before, (end(first) + start(second)) / 2, after] : [before, after]
+            }
+        }
+        func closer(_ edge: (CGFloat, CGFloat)?, _ spacing: (CGFloat, CGFloat)?) -> (CGFloat, CGFloat)? {
+            guard let edge, let spacing else { return edge ?? spacing }
+            return abs(edge.0) <= abs(spacing.0) ? edge : spacing
+        }
+        let x = closer(nearest([candidate.minX, candidate.midX, candidate.maxX], to: anchors.flatMap { [$0.minX, $0.midX, $0.maxX] }),
+                       nearest([candidate.midX], to: gaps(start: \.minX, end: \.maxX, size: candidate.width)))
+        let y = closer(nearest([candidate.minY, candidate.midY, candidate.maxY], to: anchors.flatMap { [$0.minY, $0.midY, $0.maxY] }),
+                       nearest([candidate.midY], to: gaps(start: \.minY, end: \.maxY, size: candidate.height)))
         return Self(delta: CGSize(width: delta.width + (x?.0 ?? 0), height: delta.height + (y?.0 ?? 0)), x: x?.1, y: y?.1)
     }
 }

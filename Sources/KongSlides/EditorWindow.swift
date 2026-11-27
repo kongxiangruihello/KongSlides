@@ -13,6 +13,7 @@ final class EditorWindow: NSWindowController, NSWindowDelegate, NSMenuDelegate {
         window.identifier = NSUserInterfaceItemIdentifier("KongSlidesEditor")
         window.isReleasedWhenClosed = false
         window.delegate = self
+        session.editorWindow = window
         window.contentViewController = NSHostingController(rootView: EditorWindowContent(session: session))
         window.contentMinSize = NSSize(width: 1040, height: 660)
         window.setFrameAutosaveName("KongSlidesEditor")

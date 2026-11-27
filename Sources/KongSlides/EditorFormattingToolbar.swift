@@ -106,11 +106,13 @@ struct EditorFormattingToolbar: View {
             HStack(spacing: 4) {
                 switch item {
                 case .insert: EmptyView()
-                case .lists:
+                case .bullets:
                     tool("项目符号", icon: "list.bullet", active: selectedBullets(numbered: false)) { bullets(numbered: false) }
+                case .numbers:
                     tool("编号", icon: "list.number", active: selectedBullets(numbered: true)) { bullets(numbered: true) }
                 case .font:
                     fontMenu
+                case .size:
                     sizeMenu
                     tool("增大字号", icon: "textformat.size.larger") { changeSize(by: true) }
                     tool("减小字号", icon: "textformat.size.smaller") { changeSize(by: false) }
@@ -141,7 +143,7 @@ struct EditorFormattingToolbar: View {
                         Button("全部大写") { update { $0.changeLetterCase(in: textRanges, uppercase: true) } }
                         Button("全部小写") { update { $0.changeLetterCase(in: textRanges, uppercase: false) } }
                     }
-                case .colors:
+                case .highlight:
                     compactMenu("文字高亮", icon: "highlighter", color: primary?.characterStyle?.highlight ?? "FFE766") {
                         Button("取消高亮") { changeCharacter { $0.highlight = nil } }
                         colorChoices([("黄色", "FFE766"), ("绿色", "B7EB90"), ("浅蓝", "A9DBFA"),
@@ -149,6 +151,7 @@ struct EditorFormattingToolbar: View {
                             changeCharacter { $0.highlight = value }
                         }
                     }
+                case .colors:
                     compactMenu("文字颜色", icon: "character", color: primary?.color ?? Palette.ink) {
                         colorChoices([("墨黑", Palette.ink), ("红色", "D62637"), ("蓝色", "2257BC"),
                                       ("绿色", "287840"), ("紫色", Palette.indigo), ("白色", "FFFFFF")]) { value in
@@ -333,8 +336,8 @@ struct EditorFormattingToolbar: View {
 
 
 enum FormattingGroup: String, CaseIterable, Identifiable {
-    case insert = "文本框", lists = "项目符号与编号", font = "字体与字号", emphasis = "字形与间距"
-    case colors = "颜色与高亮", alignment = "对齐与段落", paint = "格式刷"
+    case insert = "文本框", bullets = "项目符号", numbers = "编号", font = "字体", size = "字号"
+    case emphasis = "字形与间距", highlight = "高亮", colors = "文字颜色", alignment = "对齐与段落", paint = "格式刷"
     var id: Self { self }
 
     static func decode(_ encoded: String, fill: Bool) -> [Self] {

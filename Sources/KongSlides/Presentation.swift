@@ -50,6 +50,7 @@ final class PresentationController: NSObject, ObservableObject, NSWindowDelegate
     private var customPositions: [Int]?
     private var reviewCompletion: ((ClassroomReview) -> Void)?
     private var visited: [Int] = []
+    private var showStartIndex = 0
 
     var notes: [String] {
         let text = deck.slides[index].speakerNotes
@@ -76,6 +77,7 @@ final class PresentationController: NSObject, ObservableObject, NSWindowDelegate
         reviewCompletion = onReview
         customPositions = route
         visited = [first]
+        showStartIndex = first
         if onRehearsalFinished != nil || onReview != nil {
             for (position, page) in deck.slides.enumerated() {
                 if position == 0 || deck.slides[position - 1].section != page.section {
@@ -194,7 +196,7 @@ final class PresentationController: NSObject, ObservableObject, NSWindowDelegate
         let completion = rehearsalCompletion
         let results = rehearsal
         let onReview = reviewCompletion
-        let route = customPositions ?? deck.slides.indices.filter { !deck.slides[$0].isBackup }
+        let route = customPositions ?? deck.slides.indices.filter { $0 >= showStartIndex && !deck.slides[$0].isBackup }
         let summary = active && onReview != nil ? ClassroomReview(
             date: started, lastPage: deck.slides[index].id,
             visited: visited.map { deck.slides[$0].id },
@@ -360,7 +362,11 @@ private struct PresenterView: View {
                         .monospacedDigit().font(.title2)
                 }
                 Menu("讨论计时") {
-                    Stepper("\(discussionMinutes) 分钟", value: $discussionMinutes, in: 1...90)
+                    Picker("时长", selection: $discussionMinutes) {
+                        ForEach([1, 2, 3, 5, 10, 15, 20, 30], id: \.self) { minutes in
+                            Text("\(minutes) 分钟").tag(minutes)
+                        }
+                    }
                     Button("开始 \(discussionMinutes) 分钟") {
                         session.discussionEnd = Date().addingTimeInterval(Double(discussionMinutes * 60))
                     }
