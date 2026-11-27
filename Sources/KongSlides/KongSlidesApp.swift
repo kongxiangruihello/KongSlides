@@ -505,6 +505,7 @@ struct EditorView: View {
             .buttonStyle(.plain)
             .accessibilityElement(children: .combine)
             .accessibilityAddTraits(row.id == slide.id ? .isSelected : [])
+            .accessibilityIdentifier("slide-thumbnail-" + row.id.uuidString)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .contextMenu {
@@ -542,6 +543,7 @@ struct EditorView: View {
                     .onTapGesture { clearObjectSelection() }
                 ZStack(alignment: .topLeading) {
                     SlideSurface(slide: slide, images: deck.images, omittedObject: editingID, canvas: deck.pageCanvas)
+                        .accessibilityIdentifier("editor-canvas-" + slide.id.uuidString)
                         .onTapGesture { clearObjectSelection() }
                         .gesture(objectMarqueeGesture(scale: scale))
                     ForEach(slide.objects.filter { !$0.isLocked }) { object in
@@ -752,6 +754,7 @@ struct EditorView: View {
                 .scrollContentBackground(.hidden)
                 .frame(height: (notesHeight + notesResize).clamped(72...260))
                 .accessibilityLabel("逐字讲稿")
+                .accessibilityIdentifier("editor-notes-" + slide.id.uuidString)
         }
         .padding(.horizontal, 12).padding(.bottom, 10)
     }

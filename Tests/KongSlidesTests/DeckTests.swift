@@ -333,6 +333,31 @@ final class DeckTests: XCTestCase {
         XCTAssertLessThan(newTime, oldTime)
     }
 
+    func testIndexedImportExportAndSearchOnHundredAndTwoHundredPages() throws {
+        let clock = ContinuousClock()
+        let picture = try XCTUnwrap(Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aTioAAAAASUVORK5CYII="))
+        for count in [100, 200] {
+            let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".pptx")
+            defer { try? FileManager.default.removeItem(at: url) }
+            let asset = UUID()
+            let pages = (1...count).map { number in
+                Slide(speakerNotes: "课堂讲稿", objects: [
+                    SlideObject(text: "第 \(number) 页"), SlideObject(kind: .image, imageID: asset)
+                ])
+            }
+            let start = clock.now
+            try PowerPoint.write(Deck(slides: pages, images: [asset: picture]), to: url)
+            let written = clock.now
+            let imported = try PowerPoint.read(url, prepareImage: { $0 }).deck
+            let opened = clock.now
+            let matches = imported.slides.filter { SlideSearchHit.first(on: $0, query: "课堂讲稿") != nil }
+            let searched = clock.now
+            print("PPTX \(count)-page sample: export \(written - start), import \(opened - written), search \(searched - opened)")
+            XCTAssertEqual(matches.count, count)
+            XCTAssertEqual(imported.images.count, 1)
+        }
+    }
+
     func testPreflightIdentifiesClippingAndPDFUsesSameTextFrame() throws {
         let visible = SlideObject(x: 60, y: 40, width: 340, height: 42, text: "VISIBLE\nHIDDEN", fontSize: 27)
         let clean = SlideObject(x: 60, y: 110, width: 340, height: 95, text: "CLEAN LINE", fontSize: 27)
