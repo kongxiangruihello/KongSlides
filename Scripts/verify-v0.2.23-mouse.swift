@@ -58,8 +58,31 @@ func clickElement(_ identifier: String, x: CGFloat = 0.5, y: CGFloat = 0.5) {
     }
 }
 
+func revealClickPoint(_ identifier: String, x: CGFloat, y: CGFloat) {
+    guard let list = waitFor("sidebar-list"), let area = boundsOf(list) else { fail("Could not locate sidebar viewport") }
+    let visible = area.insetBy(dx: 1, dy: 5)
+    for _ in 0..<20 {
+        guard let item = find(identifier), let bounds = boundsOf(item) else { fail("Could not locate " + identifier) }
+        let point = CGPoint(x: bounds.minX + bounds.width * x, y: bounds.minY + bounds.height * y)
+        if visible.contains(point) {
+            print("Thumbnail mouse point visible: \(identifier) at \(point), sidebar \(area)")
+            return
+        }
+        let mouse = CGPoint(x: area.midX, y: area.midY)
+        let amount = point.y > visible.maxY ? -70 : 70
+        let event = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1,
+                            wheel1: Int32(amount), wheel2: 0, wheel3: 0)
+        event?.location = mouse
+        event?.post(tap: .cghidEventTap)
+        Thread.sleep(forTimeInterval: 0.18)
+    }
+    fail("Could not make the requested thumbnail click point visible: " + identifier)
+}
+
 func click(_ id: String, x: CGFloat, y: CGFloat) {
-    clickElement("slide-thumbnail-" + id, x: x, y: y)
+    let identifier = "slide-thumbnail-" + id
+    revealClickPoint(identifier, x: x, y: y)
+    clickElement(identifier, x: x, y: y)
     guard waitFor("editor-canvas-" + id) != nil, waitFor("editor-notes-" + id) != nil else {
         fputs("Canvas and speaker notes did not both follow the clicked thumbnail \(id)\n", stderr)
         exit(1)
