@@ -77,6 +77,7 @@ struct EditorView: View {
     @State private var canvasSnap: CanvasSnap?
     @State private var draggingPage: UUID?
     @State private var pageDropTarget: UUID?
+    @State private var pageDropAfter = false
     @State private var edgeScrollAnchor: UUID?
     @State private var edgeScroll: Task<Void, Never>?
     @State private var selectedPageIDs: Set<UUID> = []
@@ -505,6 +506,7 @@ struct EditorView: View {
             } label: { Label("讲稿", systemImage: showNotes ? "note.text.badge.minus" : "note.text") }
             .tint(notesPanelVisible ? .accentColor : .secondary)
             .buttonStyle(.bordered)
+            .background(notesPanelVisible ? Color.accentColor.opacity(0.12) : .clear, in: .rect(cornerRadius: 6))
             .accessibilityAddTraits(notesPanelVisible ? .isSelected : [])
             .help(notesPanelVisible ? "隐藏逐字讲稿" : "显示逐字讲稿")
             .accessibilityIdentifier("toggle-notes-panel")
@@ -514,6 +516,7 @@ struct EditorView: View {
             } label: { Label("属性", systemImage: "sidebar.right") }
                 .tint(inspectorPanelVisible ? .accentColor : .secondary)
                 .buttonStyle(.bordered)
+                .background(inspectorPanelVisible ? Color.accentColor.opacity(0.12) : .clear, in: .rect(cornerRadius: 6))
                 .accessibilityAddTraits(inspectorPanelVisible ? .isSelected : [])
                 .fixedSize()
                 .help(inspectorPanelVisible ? "隐藏右侧版面属性" : "显示右侧版面属性")
@@ -717,10 +720,15 @@ struct EditorView: View {
             .accessibilityIdentifier("slide-thumbnail-" + row.id.uuidString)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .modifier(ClassroomRowDrag(enabled: canReorderRows, destinationLabel: pageDropTarget == row.id ? "移到第 \(positionForRow(row.id)) 页之前" : nil,
+        .modifier(ClassroomRowDrag(enabled: canReorderRows, destinationLabel: pageDropTarget == row.id ? dropLocation(row.id) : nil,
+                                    after: pageDropAfter,
                                     provider: { startPageDrag(row.id) },
                                     entered: {
-                                        if $0 { pageDropTarget = row.id; edgeScrollAnchor = row.id }
+                                        if $0 {
+                                            pageDropTarget = row.id
+                                            pageDropAfter = false
+                                            edgeScrollAnchor = row.id
+                                        }
                                         else if pageDropTarget == row.id { pageDropTarget = nil }
                                     },
                                     dropped: { dropPage(before: row.id) }))
@@ -1066,18 +1074,27 @@ struct EditorView: View {
     }
 
     private var inspectorContents: some View {
-        ScrollViewReader { scroll in
-            ScrollView {
-                VStack(alignment: .leading, spacing: 14) {
-                    inspectorSelection
-                    if selection != nil {
-                        DisclosureGroup("页面属性") { pageInspectorControls.padding(.top, 7) }
-                    } else { pageInspectorControls }
-                    inspectorObjectList
-                }.padding(14)
-            }
-            .onChange(of: objectID) { _, id in
-                if let id { withAnimation(.easeInOut(duration: 0.18)) { scroll.scrollTo(id, anchor: .center) } }
+        GeometryReader { geometry in
+            VStack(spacing: 0) {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 14) {
+                        inspectorSelection
+                        if selection != nil {
+                            DisclosureGroup("页面属性") { pageInspectorControls.padding(.top, 7) }
+                        } else { pageInspectorControls }
+                    }.padding(14)
+                }
+                if !slide.objects.isEmpty {
+                    Divider()
+                    ScrollViewReader { scroll in
+                        ScrollView {
+                            LazyVStack(alignment: .leading, spacing: 4) { inspectorObjectList }.padding(10)
+                        }
+                        .onChange(of: objectID) { _, id in
+                            if let id { withAnimation(.easeInOut(duration: 0.18)) { scroll.scrollTo(id, anchor: .center) } }
+                        }
+                    }.frame(height: min(225, max(99, geometry.size.height * 0.36)))
+                }
             }
         }.background(Color(nsColor: .controlBackgroundColor))
     }
@@ -1151,6 +1168,10 @@ struct EditorView: View {
                         if object.kind == .image {
                             cropControls(object)
                             pictureAppearanceControls(object)
+                            HStack {
+                                number("宽", object: object, key: \.width, range: 1...1920)
+                                number("高", object: object, key: \.height, range: 1...1080)
+                            }
                         } else if let table = object.table {
                             Text("\(table.rows.count) 行 × \(table.columns.count) 列").font(.caption)
                             Button("编辑单元格…") { editTable = object }
@@ -1169,9 +1190,11 @@ struct EditorView: View {
                                         number("X", object: object, key: \.x, range: -960...960)
                                         number("Y", object: object, key: \.y, range: -540...540)
                                     }
-                                    GridRow {
-                                        number("宽", object: object, key: \.width, range: 1...1920)
-                                        number("高", object: object, key: \.height, range: 1...1080)
+                                    if object.kind != .image {
+                                        GridRow {
+                                            number("宽", object: object, key: \.width, range: 1...1920)
+                                            number("高", object: object, key: \.height, range: 1...1080)
+                                        }
                                     }
                                 }
                                 HStack {
@@ -1188,7 +1211,6 @@ struct EditorView: View {
     @ViewBuilder
     private var inspectorObjectList: some View {
                 if !slide.objects.isEmpty {
-                    Divider()
                     Text("对象").font(.headline)
                     ForEach(slide.objects.reversed()) { object in
                         Button {
@@ -2190,7 +2212,8 @@ struct EditorView: View {
             .fixedSize()
             .help("文本溢出。选择处理方式。")
             .accessibilityLabel("处理文本溢出")
-            .offset(x: 4, y: -9)
+            .offset(x: object.frame.maxX < deck.pageCanvas.width - 15 ? 10 : -1,
+                    y: object.y > 18 ? -14 : -2)
         }
     }
 
@@ -2305,6 +2328,7 @@ struct EditorView: View {
         edgeScroll = nil
         draggingPage = nil
         pageDropTarget = nil
+        pageDropAfter = false
         edgeScrollAnchor = nil
     }
 
@@ -2324,6 +2348,7 @@ struct EditorView: View {
                         cursor = next
                         edgeScrollAnchor = pages[cursor]
                         pageDropTarget = pages[cursor]
+                        pageDropAfter = side == .bottom
                         withAnimation(.linear(duration: 0.13)) { proxy.scrollTo(pages[cursor], anchor: side == .top ? .top : .bottom) }
                         try? await Task.sleep(for: .milliseconds(155))
                     }
@@ -2484,7 +2509,7 @@ struct EditorView: View {
                 if !filtered.contains(where: { $0.id == slide.id }) { Text("当前页在筛选范围外") }
             }
             if let target = pageDropTarget {
-                Text("移到第 \(positionForRow(target)) 页之前").foregroundStyle(Color.accentColor)
+                Text(dropLocation(target)).foregroundStyle(Color.accentColor)
             }
         }.font(.caption).foregroundStyle(.secondary).padding(.horizontal, 12)
     }
@@ -2528,6 +2553,10 @@ struct EditorView: View {
         }
     }
 
+    private func dropLocation(_ id: UUID) -> String {
+        "移到第 \(positionForRow(id)) 页\(pageDropAfter ? "之后" : "之前")"
+    }
+
     private func positionForRow(_ id: UUID) -> Int { (deck.slides.firstIndex(where: { $0.id == id }) ?? 0) + 1 }
 
     private func sectionCount(_ id: UUID) -> String {
@@ -2545,6 +2574,32 @@ struct EditorView: View {
             Rectangle().fill(Color.accentColor).frame(width: deck.pageCanvas.width * scale, height: 1)
                 .position(x: deck.pageCanvas.width * scale / 2, y: y * scale).allowsHitTesting(false)
             guideLabel(guide.yLabel).position(x: 45, y: y * scale).allowsHitTesting(false)
+        }
+        if !guide.xSpacing.isEmpty || !guide.ySpacing.isEmpty {
+            Path { path in
+                let rulerY = max(7, deck.pageCanvas.height * scale - 24)
+                for range in guide.xSpacing {
+                    let low = range.lowerBound * scale
+                    let high = range.upperBound * scale
+                    path.move(to: CGPoint(x: low, y: rulerY))
+                    path.addLine(to: CGPoint(x: high, y: rulerY))
+                    for x in [low, high] {
+                        path.move(to: CGPoint(x: x, y: rulerY - 4))
+                        path.addLine(to: CGPoint(x: x, y: rulerY + 4))
+                    }
+                }
+                let rulerX = max(7, deck.pageCanvas.width * scale - 24)
+                for range in guide.ySpacing {
+                    let low = range.lowerBound * scale
+                    let high = range.upperBound * scale
+                    path.move(to: CGPoint(x: rulerX, y: low))
+                    path.addLine(to: CGPoint(x: rulerX, y: high))
+                    for y in [low, high] {
+                        path.move(to: CGPoint(x: rulerX - 4, y: y))
+                        path.addLine(to: CGPoint(x: rulerX + 4, y: y))
+                    }
+                }
+            }.stroke(Color.accentColor, style: .init(lineWidth: 1.4, dash: [3, 2])).allowsHitTesting(false)
         }
     }
 

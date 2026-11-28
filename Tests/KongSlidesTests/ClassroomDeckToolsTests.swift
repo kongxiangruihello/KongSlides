@@ -4,6 +4,23 @@ import XCTest
 @testable import KongSlides
 
 final class ClassroomDeckToolsTests: XCTestCase {
+    func testSnapGuideLabelsAndEqualSpacingIntervals() {
+        let anchors = [
+            CGRect(x: 0, y: 50, width: 20, height: 20),
+            CGRect(x: 70, y: 50, width: 20, height: 20)
+        ]
+        let moving = CGRect(x: 35, y: 105, width: 20, height: 20)
+        let equal = CanvasSnap.move(moving, by: CGSize(width: 1, height: 0), anchors: anchors, tolerance: 4)
+        XCTAssertEqual(equal.xLabel, "水平等距")
+        XCTAssertEqual(equal.xSpacing, [20...35, 55...70])
+        XCTAssertEqual(equal.delta.width, 0)
+
+        let aligned = CanvasSnap.move(moving, by: CGSize(width: -34, height: -54), anchors: anchors, tolerance: 4)
+        XCTAssertEqual(aligned.xLabel, "左边缘")
+        XCTAssertEqual(aligned.delta.width, -35)
+        XCTAssertTrue(aligned.xSpacing.isEmpty)
+    }
+
     func testScopedReplacementsKeepStyledUnicodeAndFields() throws {
         var first = Slide.titleSlide("甲𠮷甲", subtitle: "甲乙")
         first.section = "甲章"

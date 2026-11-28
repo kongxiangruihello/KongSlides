@@ -246,6 +246,9 @@ struct StudentHandoutPreview: View {
     @State private var hideTeacher = true
     @State private var includeBackups = false
     @State private var preview: Data?
+    @State private var previewKey: Int?
+    private var requestKey: Int { (hideTeacher ? 2 : 0) + (includeBackups ? 1 : 0) }
+    private var currentPreview: Data? { previewKey == requestKey ? preview : nil }
     @State private var failure: String?
     @State private var selectedPage = 0
     @State private var fitPage = true
@@ -258,7 +261,7 @@ struct StudentHandoutPreview: View {
                 Toggle("隐藏答案页与教师批注", isOn: $hideTeacher)
                 Toggle("包含备用页", isOn: $includeBackups)
             }
-            if let preview, let pdf = PDFDocument(data: preview) {
+            if let preview = currentPreview, let pdf = PDFDocument(data: preview) {
                 pdfPreview(pdf).id(preview)
             } else if let failure { Text(failure).frame(maxHeight: .infinity) }
             else { ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity) }
@@ -266,12 +269,12 @@ struct StudentHandoutPreview: View {
                 Spacer()
                 Button("关闭") { dismiss() }.keyboardShortcut(.cancelAction)
                 Button("导出预览中的 PDF…") {
-                    if let preview { save(preview); dismiss() }
-                }.disabled(preview == nil)
+                    if let preview = currentPreview { save(preview); dismiss() }
+                }.disabled(currentPreview == nil)
             }
         }
         .padding(16).frame(width: 750, height: 590)
-        .task(id: (hideTeacher ? 2 : 0) + (includeBackups ? 1 : 0)) { await render() }
+        .task(id: requestKey) { await render() }
     }
 
     private func pdfPreview(_ pdf: PDFDocument) -> some View {
@@ -313,6 +316,7 @@ struct StudentHandoutPreview: View {
         preview = nil
         failure = nil
         selectedPage = 0
+        let key = requestKey
         let hidden = hideTeacher
         let backups = includeBackups
         let input = deck
@@ -326,7 +330,7 @@ struct StudentHandoutPreview: View {
                 try TeachingPDF.write(copy, format: outputFormat, includeBackups: backups, sourcePageNumbers: sourceNumbers, includeTeacherContent: !hidden, to: url)
                 return try Data(contentsOf: url)
             }.value
-            if !Task.isCancelled { preview = data }
+            if !Task.isCancelled { preview = data; previewKey = key }
         } catch { if !Task.isCancelled { failure = error.localizedDescription } }
     }
 }

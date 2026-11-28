@@ -393,6 +393,7 @@ struct ClassroomDropHandler: DropDelegate {
 struct ClassroomRowDrag: ViewModifier {
     let enabled: Bool
     let destinationLabel: String?
+    let after: Bool
     let provider: () -> NSItemProvider
     let entered: (Bool) -> Void
     let dropped: () -> Bool
@@ -400,7 +401,7 @@ struct ClassroomRowDrag: ViewModifier {
     func body(content: Content) -> some View {
         if enabled {
             content
-                .overlay(alignment: .top) {
+                .overlay(alignment: after ? .bottom : .top) {
                     if let destinationLabel {
                         VStack(alignment: .leading, spacing: 2) {
                             Rectangle().fill(Color.accentColor).frame(height: 2)
