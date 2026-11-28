@@ -1,0 +1,47 @@
+name: KongSlides 0.2.23 desktop UI verification
+on:
+  push:
+    branches: [codex/kongslides-0.2.23-desktop]
+    paths: [.github/workflows/verify-v0.2.23-editor.yml, Scripts/verify-v0.2.23-editor.swift]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  editor:
+    runs-on: macos-15
+    timeout-minutes: 12
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      BUILD_RUN: "46123715187"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download the verified build
+        run: |
+          gh run watch "$BUILD_RUN" --exit-status --interval 4
+          gh run download "$BUILD_RUN" --name KongSlides-macOS-preview --dir candidate
+          ditto -x -k candidate/KongSlides-macOS-preview.zip candidate
+      - name: Verify the 94-page editor at narrow window width
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="$(mktemp -d)"
+          app="$PWD/candidate/KongSlides.app"
+          defaults write com.kongslides.app checkForUpdatesAutomatically -bool false
+          python3 - "$root/Classroom.kongslides" <<'PY'
+          import json, sys
+          with open(sys.argv[1], "w") as out:
+              json.dump({"schemaVersion":1,"slides":[{"id":f"00000000-0000-4000-8000-{i:012d}",
+                  "background":"F8F5EE","section":f"Chapter {(i-1)//12 + 1}",
+                  "speakerNotes":f"Notes {i}","objects":[]} for i in range(1,95)],"images":[]},out)
+          PY
+          swiftc Scripts/verify-v0.2.23-editor.swift -o "$root/editor-test"
+          open -n -a "$app" "$root/Classroom.kongslides"
+          pid=""
+          for _ in {1..20}; do
+            pid="$(pgrep -nf "$app/Contents/MacOS/KongSlides" || true)"
+            [[ -n "$pid" ]] && break
+            sleep 1
+          done
+          [[ -n "$pid" ]]
+          "$root/editor-test" "$pid"
