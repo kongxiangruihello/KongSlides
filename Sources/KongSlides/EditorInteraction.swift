@@ -3,10 +3,12 @@ import SwiftUI
 
 struct EditorKeyMonitor: NSViewRepresentable {
     var handle: (NSEvent) -> Bool
+    var flagsChanged: (NSEvent) -> Void = { _ in }
 
     final class Coordinator {
         weak var view: NSView?
         var handle: (NSEvent) -> Bool
+        var flagsChanged: (NSEvent) -> Void = { _ in }
         var monitor: Any?
 
         init(handle: @escaping (NSEvent) -> Bool) { self.handle = handle }
@@ -23,16 +25,21 @@ struct EditorKeyMonitor: NSViewRepresentable {
         let view = NSView()
         let coordinator = context.coordinator
         coordinator.view = view
-        coordinator.monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak coordinator] event in
+        coordinator.flagsChanged = flagsChanged
+        coordinator.monitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { [weak coordinator] event in
             guard let coordinator, let window = coordinator.view?.window, event.window === window,
-                  window.attachedSheet == nil, NSApp.modalWindow == nil,
-                  !(window.firstResponder is NSTextView), coordinator.handle(event) else { return event }
+                  window.attachedSheet == nil, NSApp.modalWindow == nil else { return event }
+            if event.type == .flagsChanged { coordinator.flagsChanged(event); return event }
+            guard !(window.firstResponder is NSTextView), coordinator.handle(event) else { return event }
             return nil
         }
         return view
     }
 
-    func updateNSView(_ view: NSView, context: Context) { context.coordinator.handle = handle }
+    func updateNSView(_ view: NSView, context: Context) {
+        context.coordinator.handle = handle
+        context.coordinator.flagsChanged = flagsChanged
+    }
 
     static func dismantleNSView(_ view: NSView, coordinator: Coordinator) { coordinator.stop() }
 }
@@ -149,5 +156,17 @@ struct NotesFocusView: View {
     private func go(_ delta: Int) {
         let next = index + delta
         if document.deck.slides.indices.contains(next) { slideID = document.deck.slides[next].id }
+    }
+}
+
+extension SlideObject.Kind {
+    var inspectorTitle: String {
+        switch self {
+        case .text: "文字与段落"
+        case .image: "图片与裁剪"
+        case .rectangle: "形状属性"
+        case .table: "表格属性"
+        case .connector: "连接线属性"
+        }
     }
 }

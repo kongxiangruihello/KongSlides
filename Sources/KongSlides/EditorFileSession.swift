@@ -469,7 +469,7 @@ final class EditorFileSession {
                 try PowerPoint.write(snapshot.deck, to: destination)
                 return ClassroomExport.checkPowerPoint(snapshot.deck, at: destination)
             }.value
-            exportReceipt = .init(url: destination, report: report)
+            exportReceipt = .init(url: destination, audit: report)
             self.error = nil
             return
         }

@@ -50,6 +50,7 @@ struct DeckSnapshotView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var selected: Set<UUID> = []
     @State private var restoreAll = false
+    @State private var selectedChapter: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -61,18 +62,12 @@ struct DeckSnapshotView: View {
                         let tag = existing.map { $0 == slide ? "相同" : "有变更" } ?? "当前课件缺失"
                         Text("\(index + 1)  \(slide.title) · \(tag)").tag(slide.id)
                     }
-                }.frame(minWidth: 210)
+                }.frame(width: 220)
                 if let page = snapshot.deck.slides.first(where: { selected.contains($0.id) }) {
-                    VStack {
-                        Text("快照").font(.caption)
-                        SlideSurface(slide: page, images: snapshot.deck.images, canvas: snapshot.deck.pageCanvas)
-                    }
-                    VStack {
-                        Text("当前课件").font(.caption)
-                        if let existing = current.slides.first(where: { $0.id == page.id }) {
-                            SlideSurface(slide: existing, images: current.images, canvas: current.pageCanvas)
-                        } else { Text("页面已删除").foregroundStyle(.secondary) }
-                    }
+                    SlideChangePreview(before: current.slides.first { $0.id == page.id }, after: page,
+                                       original: current, revised: snapshot.deck)
+                } else {
+                    ContentUnavailableView("选择要比较的页面", systemImage: "rectangle.split.2x1")
                 }
             }
             Text("按页面标识恢复，修改可用 ⌘Z 撤销。")
@@ -82,16 +77,25 @@ struct DeckSnapshotView: View {
                 Button("关闭") { dismiss() }
                 Menu("选择快照中的章节") {
                     ForEach(Array(Set(snapshot.deck.slides.map(\.section)).filter { !$0.isEmpty }.sorted()), id: \.self) { name in
-                        Button(name) { selected = Set(snapshot.deck.slides.filter { $0.section == name }.map(\.id)) }
+                        Button(name) {
+                            selectedChapter = name
+                            selected = Set(snapshot.deck.slides.filter { $0.section == name }.map(\.id))
+                        }
                     }
                 }
-                Button("仅恢复所选讲稿") { restore(selected, true); dismiss() }.disabled(selected.isEmpty)
-                Button("恢复所选页") { restore(selected, false); dismiss() }.disabled(selected.isEmpty)
+                Button("恢复 \(selected.count) 页讲稿") { restore(selected, true); dismiss() }.disabled(selected.isEmpty)
+                Button(selectedChapter == nil ? "恢复 \(selected.count) 页" : "恢复 1 章") { restore(selected, false); dismiss() }.disabled(selected.isEmpty)
                 Button("恢复整份…") { restoreAll = true }
             }
         }
         .padding(18)
         .frame(minWidth: 720, minHeight: 420)
+        .onChange(of: selected) {
+            if let selectedChapter,
+               selected != Set(snapshot.deck.slides.filter { $0.section == selectedChapter }.map(\.id)) {
+                self.selectedChapter = nil
+            }
+        }
         .alert("用快照替换当前课件内容？", isPresented: $restoreAll) {
             Button("替换", role: .destructive) { restore(nil, false); dismiss() }
             Button("取消", role: .cancel) {}

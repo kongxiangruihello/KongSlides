@@ -25,6 +25,7 @@ struct EditorFormattingToolbar: View {
     let ranges: [Range<Int>]
     let insertTextBox: () -> Void
     let update: ((inout SlideObject) -> Void) -> Void
+    let editingText: Bool
     let paintReady: Bool
     let paint: () -> Void
     @AppStorage("formatToolbarOrder") private var storedOrder = ""
@@ -48,26 +49,50 @@ struct EditorFormattingToolbar: View {
     private var order: [FormattingGroup] { FormattingGroup.decode(storedOrder, fill: true) }
     private var overflow: Set<FormattingGroup> { Set(FormattingGroup.decode(storedOverflow, fill: false)) }
 
+    private let pinned: Set<FormattingGroup> = [.insert, .bullets, .numbers, .font, .size, .colors, .alignment]
+    private var mixedSize: Bool {
+        guard let object else { return false }
+        return Set(styles.map { $0.size ?? object.fontSize }).count > 1
+    }
+
     var body: some View {
-        HStack(spacing: 7) {
-            ScrollView(.horizontal) {
-                HStack(spacing: 5) {
-                    ForEach(order.filter { !overflow.contains($0) }) { item in
-                        group(item)
-                        rule
-                    }
+        GeometryReader { geometry in
+            let compact = geometry.size.width < 1130
+            let visible = order.filter { !overflow.contains($0) || pinned.contains($0) }
+            let deferred = order.filter { !pinned.contains($0) && (compact || overflow.contains($0)) }
+            HStack(spacing: 8) {
+                HStack(spacing: 4) {
+                    ForEach(visible.filter { pinned.contains($0) }) { item in group(item, compact: compact) }
+                }.fixedSize()
+                if !compact {
+                    ScrollView(.horizontal) {
+                        HStack(spacing: 4) {
+                            ForEach(visible.filter { !pinned.contains($0) }) { item in group(item) }
+                        }
+                    }.scrollIndicators(.hidden)
+                } else { Spacer(minLength: 0) }
+                if paintReady {
+                    Label("选择目标后应用", systemImage: "paintbrush.fill")
+                        .foregroundStyle(Color.accentColor)
+                        .help("选择目标文字后点击应用，或按 Esc 退出。")
+                        .lineLimit(1)
+                    Button("应用", action: paint).disabled(object == nil)
+                } else if let object {
+                    let scope = !textRanges.isEmpty ? "所选文字" : editingText ? "当前段落" : "整个文本框"
+                    Text(scope).font(.caption).foregroundStyle(.secondary)
+                        .help(editingText && textRanges.isEmpty ? "列表与对齐作用于当前段落；字体格式作用于整个文本框。" : object.label)
+                        .fixedSize().accessibilityIdentifier("formatting-scope")
                 }
-            }.scrollIndicators(.hidden)
-            if !overflow.isEmpty {
-                Button("更多格式") { showOverflow.toggle() }
-                    .popover(isPresented: $showOverflow) {
-                        VStack(alignment: .leading, spacing: 8) {
-                            ForEach(order.filter { overflow.contains($0) }) { item in
-                                HStack { group(item) }
-                            }
-                        }.padding(12)
-                    }
-            }
+                if !deferred.isEmpty {
+                    Button("更多格式") { showOverflow.toggle() }
+                        .fixedSize()
+                        .popover(isPresented: $showOverflow) {
+                            VStack(alignment: .leading, spacing: 8) {
+                                ForEach(deferred) { item in HStack { group(item) } }
+                            }.padding(12)
+                        }
+                }
+            }.frame(maxHeight: .infinity)
         }
         .frame(height: 36)
         .padding(.horizontal, 14)
@@ -95,7 +120,7 @@ struct EditorFormattingToolbar: View {
     @State private var showOverflow = false
 
     @ViewBuilder
-    private func group(_ item: FormattingGroup) -> some View {
+    private func group(_ item: FormattingGroup, compact: Bool = false) -> some View {
         if item == .insert {
             Button(action: insertTextBox) { Label("文本框", systemImage: "textbox") }
                 .buttonStyle(.bordered)
@@ -111,12 +136,14 @@ struct EditorFormattingToolbar: View {
                 case .numbers:
                     tool("编号", icon: "list.number", active: selectedBullets(numbered: true)) { bullets(numbered: true) }
                 case .font:
-                    fontMenu
+                    fontMenu(compact: compact)
                 case .size:
                     sizeMenu
+                    if !compact {
                     tool("增大字号", icon: "textformat.size.larger") { changeSize(by: true) }
                     tool("减小字号", icon: "textformat.size.smaller") { changeSize(by: false) }
                     tool("清除文字格式", icon: "eraser") { clearFormatting() }
+                    }
                 case .emphasis:
                     tool("粗体", icon: "bold", active: isActive { $0.bold }) {
                         let value = !isActive { $0.bold }
@@ -159,6 +186,22 @@ struct EditorFormattingToolbar: View {
                         }
                     }
                 case .alignment:
+                    if compact {
+                        Menu {
+                            ForEach(SlideParagraph.Alignment.allCases, id: \.self) { value in
+                                Button(alignmentName(value)) {
+                                    update { $0.formatParagraphs(in: ranges) { _, paragraph in paragraph.alignment = value } }
+                                }
+                            }
+                            Divider()
+                            Button("减少缩进") { indent(by: -16) }
+                            Button("增加缩进") { indent(by: 16) }
+                            lineSpacing("单倍行距", 1)
+                            lineSpacing("1.5 倍行距", 1.5)
+                            lineSpacing("双倍行距", 2)
+                            Button("清除文字格式", action: clearFormatting)
+                        } label: { Label("对齐", systemImage: "text.alignleft") }
+                    } else {
                     tool("减少缩进", icon: "decrease.indent") { indent(by: -16) }
                     tool("增加缩进", icon: "increase.indent") { indent(by: 16) }
                     alignment("左对齐", "text.alignleft", .left)
@@ -172,6 +215,7 @@ struct EditorFormattingToolbar: View {
                         lineSpacing("1.5 倍行距", 1.5)
                         lineSpacing("双倍行距", 2)
                     }
+                    }
                 case .paint:
                     tool(paintReady ? "应用格式刷" : "复制文字格式", icon: "paintbrush", active: paintReady, action: paint)
                 }
@@ -181,7 +225,17 @@ struct EditorFormattingToolbar: View {
 
     private var rule: some View { Divider().frame(height: 20).padding(.horizontal, 3) }
 
-    private var fontMenu: some View {
+    private func alignmentName(_ alignment: SlideParagraph.Alignment) -> String {
+        switch alignment {
+        case .left: "左对齐"
+        case .center: "居中"
+        case .right: "右对齐"
+        case .justified: "两端对齐"
+        case .distributed: "分散对齐"
+        }
+    }
+
+    private func fontMenu(compact: Bool) -> some View {
         Menu {
             Button("系统字体") { setFont(nil) }
             let preferred = ["Songti SC", "PingFang SC", "Heiti SC", "Kaiti SC", "Arial", "Times New Roman"]
@@ -192,7 +246,7 @@ struct EditorFormattingToolbar: View {
                 ForEach(fontFamilies, id: \.self) { value in Button(value) { setFont(value) } }
             }
         } label: {
-            Text(font ?? "系统字体").lineLimit(1).frame(width: 112, alignment: .leading)
+            Text(font ?? "系统字体").lineLimit(1).frame(width: compact ? 90 : 112, alignment: .leading)
         }
         .fixedSize()
         .accessibilityLabel("字体")
@@ -206,7 +260,7 @@ struct EditorFormattingToolbar: View {
             }
             Button("自定义字号…") { sizeInput = String(size); customSize = true }
         } label: {
-            Text(object == nil ? "—" : size.formatted(.number.precision(.fractionLength(0...2))))
+            Text(object == nil ? "—" : mixedSize ? "混合" : size.formatted(.number.precision(.fractionLength(0...2))))
                 .monospacedDigit().frame(minWidth: 30)
         }
         .fixedSize()
@@ -362,7 +416,7 @@ struct FormattingToolbarSettings: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("自定义编辑工具栏").font(.title2.bold())
-            Text("拖动工具组改变顺序。可将用得少的工具组放入「更多格式」。").font(.caption)
+            Text("拖动调整同一区域内的顺序。常用工具固定在顶部，其余可收进「更多格式」。").font(.caption)
             List(order) { group in
                 HStack {
                     Image(systemName: "line.3.horizontal").foregroundStyle(.secondary)
@@ -370,7 +424,7 @@ struct FormattingToolbarSettings: View {
                     Spacer()
                     Toggle("收进更多", isOn: Binding(get: { hidden.contains(group) }, set: {
                         if $0 { hidden.insert(group) } else { hidden.remove(group) }
-                    }))
+                    })).disabled([FormattingGroup.insert, .bullets, .numbers, .font, .size, .colors, .alignment].contains(group))
                 }
                 .draggable(group.rawValue)
                 .dropDestination(for: String.self) { values, _ in

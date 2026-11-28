@@ -49,6 +49,7 @@ struct EditorPanelResizeHandle: NSViewRepresentable {
     let identifier: String
     @Binding var translation: Double
     let resize: (Double) -> Void
+    var reset: () -> Void = {}
 
     func makeNSView(context: Context) -> DividerView {
         let view = DividerView()
@@ -61,6 +62,7 @@ struct EditorPanelResizeHandle: NSViewRepresentable {
     }
 
     func updateNSView(_ view: DividerView, context: Context) {
+        view.onReset = reset
         view.onDrag = { translation = $0 }
         view.onCommit = { offset in
             if offset != 0 { resize(offset) }
@@ -71,6 +73,7 @@ struct EditorPanelResizeHandle: NSViewRepresentable {
     final class DividerView: NSView {
         var onDrag: ((Double) -> Void)?
         var onCommit: ((Double) -> Void)?
+        var onReset: (() -> Void)?
         private var startX: CGFloat?
         private var hovering = false
         private var tracking: NSTrackingArea?
@@ -100,6 +103,12 @@ struct EditorPanelResizeHandle: NSViewRepresentable {
         }
 
         override func mouseDown(with event: NSEvent) {
+            if event.clickCount == 2 {
+                startX = nil
+                onReset?()
+                needsDisplay = true
+                return
+            }
             startX = event.locationInWindow.x
             needsDisplay = true
         }

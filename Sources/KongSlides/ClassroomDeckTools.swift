@@ -223,16 +223,18 @@ struct CanvasSnap {
     var delta: CGSize
     var x: CGFloat?
     var y: CGFloat?
+    var xLabel: String?
+    var yLabel: String?
 
     static func move(_ moved: CGRect, by delta: CGSize, anchors: [CGRect], tolerance: CGFloat) -> Self {
         let candidate = moved.offsetBy(dx: delta.width, dy: delta.height)
-        func nearest(_ coordinates: [CGFloat], to targets: [CGFloat]) -> (CGFloat, CGFloat)? {
-            var best: (CGFloat, CGFloat)?
-            for source in coordinates {
+        func nearest(_ coordinates: [CGFloat], to targets: [CGFloat], labels: [String]) -> (CGFloat, CGFloat, String)? {
+            var best: (CGFloat, CGFloat, String)?
+            for (index, source) in coordinates.enumerated() {
                 for target in targets {
                     let shift = target - source
                     if abs(shift) <= tolerance && (best == nil || abs(shift) < abs(best?.0 ?? 0)) {
-                        best = (shift, target)
+                        best = (shift, target, labels[index])
                     }
                 }
             }
@@ -248,14 +250,14 @@ struct CanvasSnap {
                 return gap >= size ? [before, (end(first) + start(second)) / 2, after] : [before, after]
             }
         }
-        func closer(_ edge: (CGFloat, CGFloat)?, _ spacing: (CGFloat, CGFloat)?) -> (CGFloat, CGFloat)? {
+        func closer(_ edge: (CGFloat, CGFloat, String)?, _ spacing: (CGFloat, CGFloat, String)?) -> (CGFloat, CGFloat, String)? {
             guard let edge, let spacing else { return edge ?? spacing }
             return abs(edge.0) <= abs(spacing.0) ? edge : spacing
         }
-        let x = closer(nearest([candidate.minX, candidate.midX, candidate.maxX], to: anchors.flatMap { [$0.minX, $0.midX, $0.maxX] }),
-                       nearest([candidate.midX], to: gaps(start: \.minX, end: \.maxX, size: candidate.width)))
-        let y = closer(nearest([candidate.minY, candidate.midY, candidate.maxY], to: anchors.flatMap { [$0.minY, $0.midY, $0.maxY] }),
-                       nearest([candidate.midY], to: gaps(start: \.minY, end: \.maxY, size: candidate.height)))
-        return Self(delta: CGSize(width: delta.width + (x?.0 ?? 0), height: delta.height + (y?.0 ?? 0)), x: x?.1, y: y?.1)
+        let x = closer(nearest([candidate.minX, candidate.midX, candidate.maxX], to: anchors.flatMap { [$0.minX, $0.midX, $0.maxX] }, labels: ["左边缘", "水平居中", "右边缘"]),
+                       nearest([candidate.midX], to: gaps(start: \.minX, end: \.maxX, size: candidate.width), labels: ["水平等距"]))
+        let y = closer(nearest([candidate.minY, candidate.midY, candidate.maxY], to: anchors.flatMap { [$0.minY, $0.midY, $0.maxY] }, labels: ["上边缘", "垂直居中", "下边缘"]),
+                       nearest([candidate.midY], to: gaps(start: \.minY, end: \.maxY, size: candidate.height), labels: ["垂直等距"]))
+        return Self(delta: CGSize(width: delta.width + (x?.0 ?? 0), height: delta.height + (y?.0 ?? 0)), x: x?.1, y: y?.1, xLabel: x?.2, yLabel: y?.2)
     }
 }

@@ -7,19 +7,32 @@ struct ExportReceipt: Identifiable {
     let url: URL
     var success = true
     var report: [String] = []
+    var audit: PowerPointAudit?
+}
+
+struct PowerPointAudit {
+    struct Difference: Identifiable {
+        let id: UUID
+        let number: Int
+        let detail: String
+    }
+
+    var checkedPages: Int?
+    var summary: String
+    var differences: [Difference] = []
 }
 
 enum ClassroomExport {
-    static func checkPowerPoint(_ expected: Deck, at url: URL) -> [String] {
+    static func checkPowerPoint(_ expected: Deck, at url: URL) -> PowerPointAudit {
         do {
             let actual = try PowerPoint.read(url, prepareImage: { $0 }).deck
-            var messages: [String] = []
-            if actual.slides.count != expected.slides.count {
-                messages.append("页数有差异：原有 \(expected.slides.count)，读回 \(actual.slides.count)。")
-            }
+            let summary = actual.slides.count == expected.slides.count
+                ? "页数和正文结构已回读核对。"
+                : "页数有差异：原有 \(expected.slides.count)，读回 \(actual.slides.count)。"
             func kinds(_ slide: Slide) -> [SlideObject.Kind: Int] {
                 Dictionary(grouping: slide.objects.filter { $0.decorationSource == nil }, by: \.kind).mapValues(\.count)
             }
+            var differences: [PowerPointAudit.Difference] = []
             for (index, pages) in zip(expected.slides, actual.slides).enumerated() {
                 var flags: [String] = []
                 if pages.0.speakerNotes != pages.1.speakerNotes { flags.append("讲稿") }
@@ -28,13 +41,16 @@ enum ClassroomExport {
                 if pages.1.importReport?.diagnostics.contains(where: { $0.impact == .pageUnavailable }) == true {
                     flags.append("整页未能读回")
                 }
-                if !flags.isEmpty { messages.append("第 \(index + 1) 页：\(flags.joined(separator: "、"))") }
+                if !flags.isEmpty {
+                    differences.append(.init(id: pages.0.id, number: index + 1, detail: flags.joined(separator: "、")))
+                }
             }
-            return messages.isEmpty
-                ? ["已回读 \(actual.slides.count) 页。页数、讲稿、备用页和可编辑对象数量通过核对。"]
-                : messages
+            for (index, slide) in expected.slides.enumerated().dropFirst(actual.slides.count) {
+                differences.append(.init(id: slide.id, number: index + 1, detail: "没有对应的导出页"))
+            }
+            return .init(checkedPages: actual.slides.count, summary: summary, differences: differences)
         } catch {
-            return ["PPTX 已写入，但回读未完成：\(error.localizedDescription)"]
+            return .init(summary: "PPTX 已写入，但回读未完成：\(error.localizedDescription)")
         }
     }
 
@@ -73,6 +89,7 @@ enum ClassroomExport {
 
 struct ExportReceiptView: View {
     let receipt: ExportReceipt
+    let openPage: (UUID) -> Void
     @Environment(\.dismiss) private var dismiss
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -81,6 +98,29 @@ struct ExportReceiptView: View {
                 .font(.title2.bold())
             Text(receipt.url.lastPathComponent).font(.headline)
             Text(receipt.url.deletingLastPathComponent().path).font(.caption).textSelection(.enabled)
+            if let audit = receipt.audit {
+                if let count = audit.checkedPages {
+                    Text("已检查 \(count) 页").font(.headline)
+                }
+                Text(audit.summary).foregroundStyle(.secondary)
+                if !audit.differences.isEmpty {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 7) {
+                            ForEach(audit.differences) { item in
+                                Button {
+                                    openPage(item.id)
+                                    dismiss()
+                                } label: {
+                                    Label("导出第 \(item.number) 页 · \(item.detail)", systemImage: "arrow.up.right.square")
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                }.buttonStyle(.link)
+                            }
+                        }
+                    }.frame(maxHeight: 228)
+                } else if audit.checkedPages != nil {
+                    Text("讲稿、备用页和可编辑对象数量一致。").foregroundStyle(.secondary)
+                }
+            }
             if !receipt.report.isEmpty {
                 ScrollView {
                     Text(receipt.report.joined(separator: "\n")).textSelection(.enabled)
@@ -207,6 +247,8 @@ struct StudentHandoutPreview: View {
     @State private var includeBackups = false
     @State private var preview: Data?
     @State private var failure: String?
+    @State private var selectedPage = 0
+    @State private var fitPage = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -217,7 +259,7 @@ struct StudentHandoutPreview: View {
                 Toggle("包含备用页", isOn: $includeBackups)
             }
             if let preview, let pdf = PDFDocument(data: preview) {
-                HandoutPDFView(document: pdf).id(preview)
+                pdfPreview(pdf).id(preview)
             } else if let failure { Text(failure).frame(maxHeight: .infinity) }
             else { ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity) }
             HStack {
@@ -232,9 +274,45 @@ struct StudentHandoutPreview: View {
         .task(id: (hideTeacher ? 2 : 0) + (includeBackups ? 1 : 0)) { await render() }
     }
 
+    private func pdfPreview(_ pdf: PDFDocument) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                let total = deck.slides.count {
+                    (includeBackups || !$0.isBackup) && (!hideTeacher || $0.teacherOnly != true)
+                }
+                Text("\(hideTeacher ? "隐藏教师内容后" : "当前配布稿") · \(total) 张幻灯片 / \(pdf.pageCount) 页 PDF")
+                    .font(.headline)
+                Spacer()
+                Button("适合页面") { fitPage = true }.tint(fitPage ? .accentColor : .secondary)
+                Button("100%") { fitPage = false }.tint(!fitPage ? .accentColor : .secondary)
+            }
+            HStack(spacing: 12) {
+                ScrollView {
+                    LazyVStack(spacing: 8) {
+                        ForEach(0..<pdf.pageCount, id: \.self) { index in
+                            if let page = pdf.page(at: index) {
+                                Button { selectedPage = index } label: {
+                                    VStack {
+                                        Image(nsImage: page.thumbnail(of: NSSize(width: 100, height: 130), for: .mediaBox))
+                                            .resizable().scaledToFit().frame(width: 88, height: 110)
+                                        Text("第 \(index + 1) 页").font(.caption)
+                                    }.padding(4).background(index == selectedPage ? Color.accentColor.opacity(0.22) : .clear,
+                                                             in: .rect(cornerRadius: 4))
+                                }.buttonStyle(.plain)
+                            }
+                        }
+                    }
+                }.frame(width: 115)
+                Divider()
+                HandoutPDFView(document: pdf, index: selectedPage, fitPage: fitPage)
+            }
+        }
+    }
+
     private func render() async {
         preview = nil
         failure = nil
+        selectedPage = 0
         let hidden = hideTeacher
         let backups = includeBackups
         let input = deck
@@ -255,11 +333,23 @@ struct StudentHandoutPreview: View {
 
 private struct HandoutPDFView: NSViewRepresentable {
     let document: PDFDocument
+    let index: Int
+    let fitPage: Bool
+
     func makeNSView(context: Context) -> PDFView {
         let view = PDFView()
-        view.autoScales = true
-        view.displayMode = .singlePageContinuous
+        view.displayMode = .singlePage
         return view
     }
-    func updateNSView(_ view: PDFView, context: Context) { view.document = document }
+
+    func updateNSView(_ view: PDFView, context: Context) {
+        if view.document == nil { view.document = document }
+        if let target = view.document?.page(at: index), view.currentPage !== target { view.go(to: target) }
+        if fitPage {
+            view.autoScales = true
+        } else {
+            view.autoScales = false
+            view.scaleFactor = 1
+        }
+    }
 }

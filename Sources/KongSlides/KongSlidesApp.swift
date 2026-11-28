@@ -66,6 +66,10 @@ struct EditorView: View {
     @State private var slideFilter = ClassroomSlideFilter.all
     @State private var workspaceLayout = ClassroomWorkspaceLayout.full
     @State private var styleBrush: SlideTextRun?
+    @State private var zoomPercent: Double?
+    @State private var locatedObject: UUID?
+    @State private var locateTask: Task<Void, Never>?
+    @State private var sidebarVisibleChapter: UUID?
     @State private var hiddenObjects: Set<UUID> = []
     @State private var renameTarget: SlideObject?
     @State private var objectName = ""
@@ -164,18 +168,10 @@ struct EditorView: View {
                 } ?? [],
                 insertTextBox: insertTextBox,
                 update: formatSelectedText,
+                editingText: editingID != nil,
                 paintReady: styleBrush != nil,
                 paint: useStyleBrush
             )
-            if session.saving {
-                HStack(spacing: 8) {
-                    ProgressView().controlSize(.small)
-                    Text("正在保存课件…").font(.caption)
-                    Spacer()
-                }
-                .padding(.horizontal, 16).padding(.vertical, 6)
-                .accessibilityIdentifier("saving-deck")
-            }
             if importing || session.opening {
                 let progress = session.opening ? session.progress : importProgress
                 HStack {
@@ -195,23 +191,13 @@ struct EditorView: View {
             }
             Divider()
             editorPanels
-            if let receipt = exportReceipt {
-                Divider()
-                HStack {
-                    Image(systemName: receipt.success ? "checkmark.circle" : "exclamationmark.triangle")
-                    Text(receipt.success ? "已保存 \(receipt.url.lastPathComponent)" : "未能写入 \(receipt.url.lastPathComponent)")
-                        .lineLimit(1).help(receipt.url.path)
-                    Spacer()
-                    if receipt.success {
-                        Button("在 Finder 中显示") { NSWorkspace.shared.activateFileViewerSelecting([receipt.url]) }
-                    }
-                    Button("详情") { detailedReceipt = receipt }
-                    EditorPanelCloseButton(title: "关闭写入结果", identifier: "close-export-receipt") { exportReceipt = nil }
-                }.padding(.horizontal, 12).padding(.vertical, 4)
-            }
+            Divider()
+            editorStatusBar
         }
         .background(Color(nsColor: .windowBackgroundColor))
-        .background(EditorKeyMonitor(handle: handleShortcut))
+        .background(EditorKeyMonitor(handle: handleShortcut, flagsChanged: { event in
+            if event.modifierFlags.contains(.option) { canvasSnap = nil }
+        }))
         .onAppear {
             if deck.slides.first?.id != slideID { pageToReveal = slideID }
             if deck.importedTitle != nil && deck.slides.contains(where: { $0.importReport != nil }) {
@@ -223,6 +209,7 @@ struct EditorView: View {
             importTask?.cancel()
             recoveryPending?.cancel()
             edgeScroll?.cancel()
+            locateTask?.cancel()
             RecoverySession.shared.close(recoveryID)
         }
         .dropDestination(for: URL.self) { urls, _ in
@@ -377,7 +364,11 @@ struct EditorView: View {
             }
         }
         .sheet(item: $classroomSheet) { classroomTool($0) }
-        .sheet(item: $detailedReceipt) { ExportReceiptView(receipt: $0) }
+        .sheet(item: $detailedReceipt) { receipt in
+            ExportReceiptView(receipt: receipt) { page in
+                if deck.slides.contains(where: { $0.id == page }) { selectPages([page]) }
+            }
+        }
         .onChange(of: session.exportReceipt?.id) {
             if let receipt = session.exportReceipt {
                 session.exportReceipt = nil
@@ -414,6 +405,7 @@ struct EditorView: View {
             additionalObjects.removeAll()
             editingID = nil
             canvasSnap = nil
+            locatedObject = nil
         }
         .onChange(of: objectID) {
             if editingID != objectID {
@@ -437,13 +429,16 @@ struct EditorView: View {
             HStack(spacing: 0) {
                 if workspaceLayout == .full {
                     sidebar.frame(width: widths.width(.left, translation: sidebarDrag))
-                    EditorPanelResizeHandle(title: "拖动调整缩略图栏宽度", identifier: "resize-slide-sidebar",
-                                            translation: $sidebarDrag) { offset in
+                    EditorPanelResizeHandle(title: "拖动调整缩略图栏宽度，双击恢复默认", identifier: "resize-slide-sidebar",
+                                            translation: $sidebarDrag, resize: { offset in
                         let width = widths.width(.left, translation: offset)
                         if width != widths.left { sidebarWidth = width }
-                    }
+                    }, reset: { sidebarWidth = 206 })
                     .frame(width: EditorPanelWidths.dividerWidth)
                     .frame(maxHeight: .infinity)
+                    .overlay(alignment: .top) {
+                        if sidebarDrag != 0 { panelWidthBadge(widths.width(.left, translation: sidebarDrag)) }
+                    }
                     .zIndex(1)
                 }
                 VStack(spacing: 0) {
@@ -458,13 +453,16 @@ struct EditorView: View {
                     }
                 }
                 if showInspector && workspaceLayout == .full {
-                    EditorPanelResizeHandle(title: "拖动调整版面属性宽度", identifier: "resize-layout-inspector",
-                                            translation: $inspectorDrag) { offset in
+                    EditorPanelResizeHandle(title: "拖动调整版面属性宽度，双击恢复默认", identifier: "resize-layout-inspector",
+                                            translation: $inspectorDrag, resize: { offset in
                         let width = widths.width(.right, translation: offset)
                         if width != widths.right { inspectorWidth = width }
-                    }
+                    }, reset: { inspectorWidth = 230 })
                     .frame(width: EditorPanelWidths.dividerWidth)
                     .frame(maxHeight: .infinity)
+                    .overlay(alignment: .top) {
+                        if inspectorDrag != 0 { panelWidthBadge(widths.width(.right, translation: inspectorDrag)) }
+                    }
                     .zIndex(1)
                     inspector.frame(width: widths.width(.right, translation: inspectorDrag))
                 }
@@ -502,19 +500,28 @@ struct EditorView: View {
             } label: { Label("表格", systemImage: "tablecells") }
             Spacer(minLength: 3)
             Button {
-                showNotes.toggle()
+                if workspaceLayout != .full { workspaceLayout = .full; showNotes = true }
+                else { showNotes.toggle() }
             } label: { Label("讲稿", systemImage: showNotes ? "note.text.badge.minus" : "note.text") }
-            .help(showNotes ? "隐藏逐字讲稿" : "显示逐字讲稿")
+            .tint(notesPanelVisible ? .accentColor : .secondary)
+            .buttonStyle(.bordered)
+            .accessibilityAddTraits(notesPanelVisible ? .isSelected : [])
+            .help(notesPanelVisible ? "隐藏逐字讲稿" : "显示逐字讲稿")
             .accessibilityIdentifier("toggle-notes-panel")
-            Button { showInspector.toggle() } label: { Label("属性", systemImage: "sidebar.right") }
-                .foregroundStyle(showInspector ? Color.accentColor : Color.primary)
+            Button {
+                if workspaceLayout != .full { workspaceLayout = .full; showInspector = true }
+                else { showInspector.toggle() }
+            } label: { Label("属性", systemImage: "sidebar.right") }
+                .tint(inspectorPanelVisible ? .accentColor : .secondary)
+                .buttonStyle(.bordered)
+                .accessibilityAddTraits(inspectorPanelVisible ? .isSelected : [])
                 .fixedSize()
-                .help(showInspector ? "隐藏右侧版面属性" : "显示右侧版面属性")
-                .accessibilityLabel(showInspector ? "隐藏右侧版面属性" : "显示右侧版面属性")
+                .help(inspectorPanelVisible ? "隐藏右侧版面属性" : "显示右侧版面属性")
+                .accessibilityLabel(inspectorPanelVisible ? "隐藏右侧版面属性" : "显示右侧版面属性")
                 .accessibilityIdentifier("toggle-inspector-panel")
             Menu {
-                Button("打开课件…") { session.chooseFile() }
-                Button("追加 PowerPoint 页面…") { importPowerPoint() }
+                Button("打开课件（切换当前课件）…") { session.chooseFile() }
+                Button("追加 PPTX 页面（保留当前课件）…") { importPowerPoint() }
             } label: { Label("导入", systemImage: "square.and.arrow.down") }
             .fixedSize()
             .disabled(importing || session.opening || session.saving)
@@ -527,17 +534,20 @@ struct EditorView: View {
                 }
                 Button("投影 PDF…", action: exportProjectionPDF)
                 Divider()
-                Button("整份课件的授课资料…") { exportClassroomPackage() }
-                Button("本章授课资料…", action: exportChapterPackage)
-                    .disabled(slide.section.isEmpty)
-                Menu("讲稿与配布 PDF") {
-                    Button("教师讲稿版…") { exportTeachingPDF(.teacher) }
-                    Button("学生配布版 · 每页 2 张…") { exportTeachingPDF(.studentTwo) }
-                    Button("学生配布版 · 每页 3 张…") { exportTeachingPDF(.studentThree) }
+                Button("教师讲稿…") { exportTeachingPDF(.teacher) }
+                Menu("学生配布稿") {
+                    Button("每页 2 张…") { exportTeachingPDF(.studentTwo) }
+                    Button("每页 3 张…") { exportTeachingPDF(.studentThree) }
                 }
                 Divider()
-                Button("选中页另存 PPTX…") { exportSelected(selectedPages, format: .powerPoint) }.disabled(selectedPages.isEmpty)
-                Button("选中页导出 PDF…") { exportSelected(selectedPages, format: .projection) }.disabled(selectedPages.isEmpty)
+                Menu("所选页") {
+                    Button("另存 PPTX…") { exportSelected(selectedPages, format: .powerPoint) }
+                    Button("导出 PDF…") { exportSelected(selectedPages, format: .projection) }
+                }.disabled(selectedPages.isEmpty)
+                Menu("授课资料包") {
+                    Button("整份课件…") { exportClassroomPackage() }
+                    Button("本章…", action: exportChapterPackage).disabled(slide.section.isEmpty)
+                }
                 Button("教室兼容 PPTX 副本…") { classroomSheet = .compatibility }
             } label: { Label("导出", systemImage: "square.and.arrow.up") }
             .fixedSize()
@@ -549,27 +559,33 @@ struct EditorView: View {
                         session.toggleFavorite(file)
                     }
                 }
-                Button("查找与替换…") { classroomSheet = .replace }.keyboardShortcut("f", modifiers: [.command, .shift])
-                Button("批量调整所选页…") { classroomSheet = .batch }.disabled(selectedPages.isEmpty)
-                Button("自动页码与课程页脚…") { classroomSheet = .footer }
-                Button("自定义编辑工具栏…") { classroomSheet = .toolbar }
-                Menu("编辑布局") {
-                    ForEach(ClassroomWorkspaceLayout.allCases) { mode in
-                        Button(mode.rawValue) { workspaceLayout = mode }
+                Section("编辑与排版") {
+                    Button("查找与替换…") { classroomSheet = .replace }.keyboardShortcut("f", modifiers: [.command, .shift])
+                    Button("批量调整所选页…") { classroomSheet = .batch }.disabled(selectedPages.isEmpty)
+                    Button("自动页码与课程页脚…") { classroomSheet = .footer }
+                    Button("自定义编辑工具栏…") { classroomSheet = .toolbar }
+                    Menu("编辑布局") {
+                        ForEach(ClassroomWorkspaceLayout.allCases) { mode in
+                            Button(mode.rawValue) { workspaceLayout = mode }
+                        }
                     }
+                    Button("全文替换字体…") { fontReplacementSheet = true }
                 }
-                Button("长课件性能测量…") { classroomSheet = .benchmark }
-                Button("自定义放映顺序…") { classroomSheet = .shows }
-                Button("课后回顾…") { classroomSheet = .review }.disabled(deck.classroomReview == nil)
-                Button("查看打开耗时…") { showOpenTiming = true }.disabled(session.openTiming == nil)
-                Button("查看 PPTX 导入报告") { reviewMode = .imported }
-                    .disabled(!deck.slides.contains { $0.importReport != nil })
-                Button("对照原稿 PDF…", action: chooseReferencePDF)
-                Button("全文替换字体…") { fontReplacementSheet = true }
-                Button("课件恢复…") { recoverySheet = true }
-                Button("保存命名快照…", action: saveDeckSnapshot)
-                Button("打开课件快照…", action: openDeckSnapshot)
-                Button("排练放映并计时…", action: startRehearsal)
+                Section("课件检查与恢复") {
+                    Button("长课件性能测量…") { classroomSheet = .benchmark }
+                    Button("查看打开耗时…") { showOpenTiming = true }.disabled(session.openTiming == nil)
+                    Button("查看 PPTX 导入报告") { reviewMode = .imported }
+                        .disabled(!deck.slides.contains { $0.importReport != nil })
+                    Button("对照原稿 PDF…", action: chooseReferencePDF)
+                    Button("课件恢复…") { recoverySheet = true }
+                    Button("保存命名快照…", action: saveDeckSnapshot)
+                    Button("打开课件快照…", action: openDeckSnapshot)
+                }
+                Section("课堂与放映") {
+                    Button("自定义放映顺序…") { classroomSheet = .shows }
+                    Button("课后回顾…") { classroomSheet = .review }.disabled(deck.classroomReview == nil)
+                    Button("排练放映并计时…", action: startRehearsal)
+                }
             } label: { Label("更多", systemImage: "ellipsis.circle") }
             .fixedSize()
             Button(action: runPreflight) { Label("放映前检查", systemImage: "checklist") }
@@ -612,33 +628,8 @@ struct EditorView: View {
             Picker("筛选", selection: $slideFilter) {
                 ForEach(ClassroomSlideFilter.allCases) { filter in Text(filter.rawValue).tag(filter) }
             }.padding(.horizontal, 12)
-            ScrollViewReader { scroll in
-                List {
-                    ForEach(visibleSlides) { row in
-                        slideRow(row).id(row.id)
-                    }
-                    .onMove(perform: canReorderRows ? reorder : nil)
-                }
-                .listStyle(.sidebar)
-                .accessibilityIdentifier("sidebar-list")
-                .overlay(alignment: .top) { if draggingPage != nil { scrollEdge(.top, using: scroll) } }
-                .overlay(alignment: .bottom) { if draggingPage != nil { scrollEdge(.bottom, using: scroll) } }
-                .onChange(of: pageToReveal) { _, target in
-                    guard let target else { return }
-                    if let range = sectionRange(target) {
-                        let header = deck.slides[range.lowerBound].id
-                        if header != target, collapsedSections.remove(header) != nil { return }
-                    }
-                    scroll.scrollTo(target, anchor: .center)
-                    pageToReveal = nil
-                }
-                .onChange(of: collapsedSections) {
-                    if let target = pageToReveal {
-                        scroll.scrollTo(target, anchor: .center)
-                        pageToReveal = nil
-                    }
-                }
-            }
+            sidebarContext
+            sidebarList
             Button { overviewSheet = true } label: { Label("网格总览…", systemImage: "square.grid.2x2") }
                 .padding(.horizontal, 12).padding(.bottom, 8)
         }
@@ -669,8 +660,15 @@ struct EditorView: View {
                         else { collapsedSections.insert(row.id) }
                         selectPages([row.id], reveal: false)
                     } label: {
-                        Label(row.section, systemImage: collapsedSections.contains(row.id) ? "chevron.right" : "chevron.down")
-                            .font(.caption.weight(.semibold)).lineLimit(1)
+                        HStack(spacing: 6) {
+                            Image(systemName: collapsedSections.contains(row.id) ? "chevron.right" : "chevron.down")
+                            Text(row.section).lineLimit(1)
+                            Spacer(minLength: 0)
+                            Text(sectionCount(row.id)).foregroundStyle(.secondary)
+                        }
+                        .font(.caption.weight(.semibold))
+                        .frame(minHeight: 27)
+                        .contentShape(Rectangle())
                     }.buttonStyle(.plain)
                     .accessibilityIdentifier("sidebar-section-" + row.id.uuidString)
                 } else {
@@ -684,10 +682,12 @@ struct EditorView: View {
                         .clipShape(.rect(cornerRadius: 4))
                         .overlay(RoundedRectangle(cornerRadius: 4).strokeBorder(
                             row.id == slide.id ? Color.accentColor : .secondary.opacity(0.24),
-                            lineWidth: row.id == slide.id ? 2 : 1))
+                            lineWidth: row.id == slide.id ? 3 : 1))
                         .accessibilityHidden(true)
                     HStack(spacing: 7) {
-                        Text(String(format: "%02d", position + 1)).monospacedDigit().foregroundStyle(.secondary)
+                        Text(String(format: "%02d", position + 1)).monospacedDigit()
+                            .fontWeight(row.id == slide.id ? .bold : .regular)
+                            .foregroundStyle(row.id == slide.id ? Color.accentColor : Color.secondary)
                         Text(row.title).lineLimit(1)
                         if row.isBackup {
                             Image(systemName: "eye.slash").foregroundStyle(.secondary)
@@ -707,7 +707,7 @@ struct EditorView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .contentShape(Rectangle())
                 .background(
-                    selectedPages.contains(row.id) || row.id == slide.id ? Color.accentColor.opacity(0.14) : .clear,
+                    row.id == slide.id ? Color.accentColor.opacity(0.20) : selectedPages.contains(row.id) ? Color.accentColor.opacity(0.10) : .clear,
                     in: .rect(cornerRadius: 5)
                 )
             }
@@ -717,7 +717,7 @@ struct EditorView: View {
             .accessibilityIdentifier("slide-thumbnail-" + row.id.uuidString)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .modifier(ClassroomRowDrag(enabled: canReorderRows, highlighted: pageDropTarget == row.id,
+        .modifier(ClassroomRowDrag(enabled: canReorderRows, destinationLabel: pageDropTarget == row.id ? "移到第 \(positionForRow(row.id)) 页之前" : nil,
                                     provider: { startPageDrag(row.id) },
                                     entered: {
                                         if $0 { pageDropTarget = row.id; edgeScrollAnchor = row.id }
@@ -771,9 +771,23 @@ struct EditorView: View {
         GeometryReader { geometry in
             let scale = max(0.1, min((geometry.size.width - 48) / deck.pageCanvas.width,
                                      (geometry.size.height - 48) / deck.pageCanvas.height))
-            ZStack {
-                Color(nsColor: .underPageBackgroundColor)
-                    .onTapGesture { clearObjectSelection() }
+            let actualScale = zoomPercent.map { $0 / 100 } ?? scale
+            if zoomPercent == nil {
+                canvasWorkspace(scale: actualScale)
+            } else {
+                ScrollView([.horizontal, .vertical]) {
+                    canvasWorkspace(scale: actualScale)
+                        .frame(minWidth: geometry.size.width, minHeight: geometry.size.height)
+                }.background(Color(nsColor: .underPageBackgroundColor))
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func canvasWorkspace(scale: CGFloat) -> some View {
+        ZStack {
+            Color(nsColor: .underPageBackgroundColor)
+                .onTapGesture { clearObjectSelection() }
                 ZStack(alignment: .topLeading) {
                     SlideSurface(slide: slide, images: deck.images, omittedObject: editingID, hiddenObjects: hiddenObjects, canvas: deck.pageCanvas,
                                  imageCache: imageCache, didDraw: awaitingFirstDraw ? firstCanvasDraw : nil)
@@ -793,15 +807,13 @@ struct EditorView: View {
                     ForEach(slide.objects.filter { !$0.isLocked && !hiddenObjects.contains($0.id) }) { object in
                         objectOverlay(object, scale: scale)
                     }
-                    if let guide = canvasSnap {
-                        if let x = guide.x {
-                            Rectangle().fill(Color.accentColor).frame(width: 1, height: deck.pageCanvas.height * scale)
-                                .position(x: x * scale, y: deck.pageCanvas.height * scale / 2).allowsHitTesting(false)
-                        }
-                        if let y = guide.y {
-                            Rectangle().fill(Color.accentColor).frame(width: deck.pageCanvas.width * scale, height: 1)
-                                .position(x: deck.pageCanvas.width * scale / 2, y: y * scale).allowsHitTesting(false)
-                        }
+                    if let guide = canvasSnap { canvasGuides(guide, scale: scale) }
+                    if let locatedObject, let located = slide.objects.first(where: { $0.id == locatedObject }),
+                       !hiddenObjects.contains(located.id) {
+                        RoundedRectangle(cornerRadius: 3).strokeBorder(Color.accentColor, style: .init(lineWidth: 3, dash: [6, 3]))
+                            .frame(width: located.width * scale, height: located.height * scale)
+                            .position(x: located.frame.midX * scale, y: located.frame.midY * scale)
+                            .allowsHitTesting(false)
                     }
                     if let objectMarquee {
                         Rectangle().fill(Color.accentColor.opacity(0.10))
@@ -824,9 +836,8 @@ struct EditorView: View {
                 .clipped()
                 .coordinateSpace(name: "slideCanvas")
                 .shadow(color: .black.opacity(0.15), radius: 12, y: 5)
-            }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .frame(minWidth: deck.pageCanvas.width * scale + 32, minHeight: deck.pageCanvas.height * scale + 32)
     }
 
     private func clearObjectSelection() {
@@ -960,6 +971,10 @@ struct EditorView: View {
                 if editingID == object.id {
                     editingID = nil
                 }
+            }, cancel: {
+                styleBrush = nil
+                editingID = nil
+                selectedTextRanges = []
             })
                 .id(object.id)
                 .background(Color(nsColor: Palette.color(slide.background)))
@@ -1037,7 +1052,7 @@ struct EditorView: View {
     private var inspector: some View {
         VStack(spacing: 0) {
             HStack {
-                Text("版面属性").font(.headline)
+                Text(selection.map { slide.objects[$0].kind.inspectorTitle } ?? "页面属性").font(.headline)
                 Spacer()
                 EditorPanelCloseButton(title: "关闭右侧版面属性", identifier: "close-inspector-panel") {
                     showInspector = false
@@ -1051,8 +1066,24 @@ struct EditorView: View {
     }
 
     private var inspectorContents: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
+        ScrollViewReader { scroll in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    inspectorSelection
+                    if selection != nil {
+                        DisclosureGroup("页面属性") { pageInspectorControls.padding(.top, 7) }
+                    } else { pageInspectorControls }
+                    inspectorObjectList
+                }.padding(14)
+            }
+            .onChange(of: objectID) { _, id in
+                if let id { withAnimation(.easeInOut(duration: 0.18)) { scroll.scrollTo(id, anchor: .center) } }
+            }
+        }.background(Color(nsColor: .controlBackgroundColor))
+    }
+
+    private var pageInspectorControls: some View {
+        VStack(alignment: .leading, spacing: 9) {
                 Button("幻灯片尺寸…") { canvasSheet = true }
                 Button("学术引文与出处…") { citationSheet = true }
                 Toggle("答案页／仅教师使用", isOn: Binding(get: { slide.teacherOnly == true }, set: {
@@ -1068,7 +1099,11 @@ struct EditorView: View {
                     .help("同名连续页共用计划时长，输入 0 清除。")
                 colorMenu("页背景", selection: slideBinding(\.background),
                           colors: [("米白", Palette.paper), ("纯白", "FFFFFF"), ("深蓝", Palette.ink), ("淡蓝", "EDF2FC")])
-                Divider()
+        }
+    }
+
+    @ViewBuilder
+    private var inspectorSelection: some View {
                 if selectedObjects.count > 1 {
                     Text("已选 \(selectedObjects.count) 个对象").font(.headline)
                     if let selection, let group = slide.objects[selection].groupID,
@@ -1127,38 +1162,52 @@ struct EditorView: View {
                                       colors: [("墨黑", Palette.ink), ("靛蓝", Palette.indigo), ("砖红", "A34E42"),
                                                ("墨绿", "286B61"), ("纯白", "FFFFFF")])
                         }
-                        Grid(alignment: .leading, horizontalSpacing: 8, verticalSpacing: 10) {
-                            GridRow {
-                                number("X", object: object, key: \.x, range: -960...960)
-                                number("Y", object: object, key: \.y, range: -540...540)
-                            }
-                            GridRow {
-                                number("宽", object: object, key: \.width, range: 1...1920)
-                                number("高", object: object, key: \.height, range: 1...1080)
-                            }
-                        }
-                        HStack {
-                            Button("置顶") { changeLayer(object.id, front: true) }
-                            Button("置底") { changeLayer(object.id, front: false) }
+                        DisclosureGroup("位置、尺寸与层次") {
+                            VStack(alignment: .leading, spacing: 8) {
+                                Grid(alignment: .leading, horizontalSpacing: 8, verticalSpacing: 10) {
+                                    GridRow {
+                                        number("X", object: object, key: \.x, range: -960...960)
+                                        number("Y", object: object, key: \.y, range: -540...540)
+                                    }
+                                    GridRow {
+                                        number("宽", object: object, key: \.width, range: 1...1920)
+                                        number("高", object: object, key: \.height, range: 1...1080)
+                                    }
+                                }
+                                HStack {
+                                    Button("置顶") { changeLayer(object.id, front: true) }
+                                    Button("置底") { changeLayer(object.id, front: false) }
+                                }
+                            }.padding(.top, 6)
                         }
                         Button("删除对象", role: .destructive) { removeObject(object.id) }
                     }
                 }
+    }
+
+    @ViewBuilder
+    private var inspectorObjectList: some View {
                 if !slide.objects.isEmpty {
                     Divider()
                     Text("对象").font(.headline)
                     ForEach(slide.objects.reversed()) { object in
                         Button {
                             chooseObject(object.id, extend: !object.isLocked && NSEvent.modifierFlags.contains(.shift))
+                            locateOnCanvas(object)
                         } label: {
-                            Label(object.label, systemImage: hiddenObjects.contains(object.id) ? "eye.slash" : object.isLocked ? "lock" : object.kind == .text ? "textformat" :
-                                    object.kind == .image ? "photo" : object.kind == .table ? "tablecells" :
-                                    object.kind == .connector ? "arrow.up.right" : "rectangle")
-                                .lineLimit(1)
-                                .frame(maxWidth: .infinity, alignment: .leading)
+                            HStack(spacing: 6) {
+                                Text(object.label).lineLimit(1)
+                                Spacer(minLength: 0)
+                                if object.isLocked { Image(systemName: "lock.fill").help("已锁定") }
+                                if hiddenObjects.contains(object.id) { Image(systemName: "eye.slash").help("临时隐藏") }
+                                if object.teacherOnly == true { Image(systemName: "person.fill").help("教师专用") }
+                            }
+                            .font(.callout)
+                            .frame(maxWidth: .infinity, alignment: .leading)
                         }
                         .buttonStyle(.plain)
                         .padding(5)
+                        .id(object.id)
                         .background(objectID == object.id ? Color.accentColor.opacity(0.12) : .clear,
                                     in: .rect(cornerRadius: 4))
                         .contextMenu {
@@ -1178,10 +1227,6 @@ struct EditorView: View {
                         }
                     }
                 }
-            }
-            .padding(14)
-        }
-        .background(Color(nsColor: .controlBackgroundColor))
     }
 
     private func addConnector(arrow: SlideConnector.Arrow) {
@@ -1454,9 +1499,6 @@ struct EditorView: View {
         pendingJump = nil
         guard deck.slides.indices.contains(page - 1) else { return }
         let id = deck.slides[page - 1].id
-        if !search.isEmpty && !filteredSlides.contains(where: { $0.id == id }) {
-            search = ""
-        }
         selectPages([id])
     }
 
@@ -1471,7 +1513,6 @@ struct EditorView: View {
 
     private func stepVisitHistory(backward: Bool) {
         guard let page = visitHistory.step(from: slide.id, backward: backward, available: Set(deck.slides.map(\.id))) else { return }
-        if !search.isEmpty && !filteredSlides.contains(where: { $0.id == page }) { search = "" }
         activatePages(SidebarPageSelection(current: page, selected: [page], anchor: page),
                       reveal: true, recordVisit: false)
     }
@@ -1479,6 +1520,10 @@ struct EditorView: View {
     private func handleShortcut(_ event: NSEvent) -> Bool {
         guard session.screen == .editor else { return false }
         let modifiers = event.modifierFlags.intersection([.command, .shift, .option, .control])
+        if modifiers.isEmpty, event.keyCode == 53 {
+            if styleBrush != nil { styleBrush = nil; return true }
+            if editingID != nil { editingID = nil; selectedTextRanges = []; return true }
+        }
         if modifiers.isEmpty {
             switch event.keyCode {
             case 116, 126: stepEditorPage(-1); return true
@@ -2033,7 +2078,7 @@ struct EditorView: View {
         let input = deck
         writeExport(at: url) {
             try SlideDrawing.pdf(input, includeBackups: includeBackups, to: url)
-            return []
+            return nil
         }
     }
     @ViewBuilder
@@ -2048,12 +2093,8 @@ struct EditorView: View {
             }
         case .batch:
             let pages = selectedPages
-            let names: [String] = deck.slides.enumerated().compactMap { index, page in
-                guard pages.contains(page.id) else { return nil }
-                let labels = page.objects.filter { $0.kind == .text && !$0.isLocked && $0.decorationSource == nil }.map(\.label)
-                return "第 \(index + 1) 页 · " + (labels.isEmpty ? page.title : labels.joined(separator: "、"))
-            }
-            BatchSlideStyleView(pages: names) { size, color, background, footer in
+            let ordered = deck.slides.filter { pages.contains($0.id) }.map(\.id)
+            BatchSlideStyleView(deck: deck, pages: ordered) { size, color, background, footer in
                 var changed = deck
                 changed.applyBatchStyle(to: pages, titleSize: size, bodyColor: color, background: background, showFooter: footer)
                 document.deck = changed
@@ -2149,6 +2190,7 @@ struct EditorView: View {
             .fixedSize()
             .help("文本溢出。选择处理方式。")
             .accessibilityLabel("处理文本溢出")
+            .offset(x: 4, y: -9)
         }
     }
 
@@ -2249,12 +2291,12 @@ struct EditorView: View {
         return provider
     }
 
-    private func dropPage(before destination: UUID) -> Bool {
+    private func dropPage(before destination: UUID, after: Bool = false) -> Bool {
         defer { stopPageDrag() }
         guard let source = draggingPage, source != destination,
               let first = deck.slides.firstIndex(where: { $0.id == source }),
               let target = deck.slides.firstIndex(where: { $0.id == destination }) else { return false }
-        reorder(from: IndexSet(integer: first), to: target)
+        reorder(from: IndexSet(integer: first), to: target + (after ? 1 : 0))
         return true
     }
 
@@ -2281,13 +2323,14 @@ struct EditorView: View {
                         guard pages.indices.contains(next) else { return }
                         cursor = next
                         edgeScrollAnchor = pages[cursor]
+                        pageDropTarget = pages[cursor]
                         withAnimation(.linear(duration: 0.13)) { proxy.scrollTo(pages[cursor], anchor: side == .top ? .top : .bottom) }
                         try? await Task.sleep(for: .milliseconds(155))
                     }
                 }
             }, dropped: {
                 guard let edgeScrollAnchor else { stopPageDrag(); return false }
-                return dropPage(before: edgeScrollAnchor)
+                return dropPage(before: edgeScrollAnchor, after: side == .bottom)
             }))
             .accessibilityHidden(true)
     }
@@ -2318,7 +2361,7 @@ struct EditorView: View {
                     return ClassroomExport.checkPowerPoint(copy, at: url)
                 case .projection:
                     try SlideDrawing.pdf(copy, includeBackups: true, to: url)
-                    return []
+                    return nil
                 }
             }
         }
@@ -2338,11 +2381,11 @@ struct EditorView: View {
         guard let url = await exportTarget(format: .pdf, name: session.name + "-" + title) else { return }
         writeExport(at: url) {
             try data.write(to: url, options: .atomic)
-            return []
+            return nil
         }
     }
 
-    private func writeExport(at url: URL, _ operation: @escaping () throws -> [String]) {
+    private func writeExport(at url: URL, _ operation: @escaping () throws -> PowerPointAudit?) {
         guard !exportBusy else { return }
         exportBusy = true
         Task { @MainActor in
@@ -2353,13 +2396,180 @@ struct EditorView: View {
                     defer { if scoped { url.stopAccessingSecurityScopedResource() } }
                     return try operation()
                 }.value
-                exportReceipt = .init(url: url, report: report)
+                exportReceipt = .init(url: url, audit: report)
             } catch {
                 exportReceipt = .init(url: url, success: false, report: [error.localizedDescription])
             }
         }
     }
 
+    private var notesPanelVisible: Bool { workspaceLayout == .notes || (workspaceLayout == .full && showNotes) }
+    private var inspectorPanelVisible: Bool { workspaceLayout == .full && showInspector }
+
+    private func panelWidthBadge(_ width: Double) -> some View {
+        Text("\(Int(width.rounded())) 点").font(.caption.monospacedDigit())
+            .padding(.horizontal, 6).padding(.vertical, 3)
+            .background(.regularMaterial, in: .rect(cornerRadius: 4))
+            .fixedSize().offset(y: 5).allowsHitTesting(false)
+    }
+
+    private var editorStatusBar: some View {
+        HStack(spacing: 10) {
+            Group {
+                if session.saving || exportBusy {
+                    ProgressView().controlSize(.small)
+                    Text("正在保存或导出…")
+                } else if session.isEdited {
+                    Label("有未保存的修改", systemImage: "circle.dotted")
+                } else if session.fileURL != nil {
+                    Label("已保存", systemImage: "checkmark.circle")
+                } else {
+                    Label("尚未保存", systemImage: "circle.dotted")
+                }
+            }.accessibilityIdentifier("saving-deck")
+            if let receipt = exportReceipt { statusReceipt(receipt) }
+            Spacer(minLength: 5)
+            Text("第 \(index + 1)/\(deck.slides.count) 页").monospacedDigit()
+                .accessibilityIdentifier("status-current-page")
+            if !selectedObjects.isEmpty {
+                Text(editingID == nil ? "已选 \(selectedObjects.count) 个对象" : "编辑文字")
+                    .help(editingID == nil ? "Delete 删除所选对象。" : "Delete 删除文字；Esc 返回选择对象。")
+            }
+            if workspaceLayout != .notes {
+                Divider().frame(height: 15)
+                Button("适合窗口") { zoomPercent = nil }.tint(zoomPercent == nil ? .accentColor : .secondary)
+                Button("100%") { zoomPercent = 100 }
+                Slider(value: Binding(get: { zoomPercent ?? 100 }, set: { zoomPercent = $0 }), in: 25...200, step: 5)
+                    .controlSize(.small).frame(width: 85).accessibilityLabel("画布缩放")
+                Text(zoomPercent.map { "\(Int($0))%" } ?? "适合").monospacedDigit().frame(width: 38)
+            }
+        }
+        .font(.caption).padding(.horizontal, 12).padding(.vertical, 5)
+        .background(Color(nsColor: .controlBackgroundColor))
+    }
+
+    private func statusReceipt(_ receipt: ExportReceipt) -> some View {
+        HStack(spacing: 5) {
+            Image(systemName: receipt.success ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                .foregroundStyle(receipt.success ? Color.accentColor : Color.orange)
+            Text(receipt.success ? receipt.url.lastPathComponent : receipt.report.first ?? "写入未完成")
+                .lineLimit(1).help(receipt.url.path).accessibilityIdentifier("export-result")
+            if receipt.success {
+                Button("在 Finder 中显示") { NSWorkspace.shared.activateFileViewerSelecting([receipt.url]) }
+            }
+            Button("详情") { detailedReceipt = receipt }
+            EditorPanelCloseButton(title: "关闭写入结果", identifier: "close-export-receipt") { exportReceipt = nil }
+        }
+    }
+
+    private var sidebarContext: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            if let chapter = sidebarVisibleChapter.flatMap({ id in deck.slides.first { $0.id == id } }) ?? (slide.section.isEmpty ? nil : slide),
+               !chapter.section.isEmpty {
+                Label(chapter.section, systemImage: "rectangle.split.3x1").lineLimit(1)
+            }
+            if slideFilter != .all || !search.isEmpty {
+                let filtered = filteredSlides
+                HStack(spacing: 4) {
+                    Text("\(slideFilter == .all ? "搜索" : slideFilter.rawValue) · \(filtered.count)/\(deck.slides.count) 页").lineLimit(1)
+                    Spacer(minLength: 0)
+                    Button {
+                        search = ""
+                        slideFilter = .all
+                        pageToReveal = slide.id
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                    }.buttonStyle(.plain).accessibilityLabel("清除搜索和筛选")
+                }
+                if !filtered.contains(where: { $0.id == slide.id }) { Text("当前页在筛选范围外") }
+            }
+            if let target = pageDropTarget {
+                Text("移到第 \(positionForRow(target)) 页之前").foregroundStyle(Color.accentColor)
+            }
+        }.font(.caption).foregroundStyle(.secondary).padding(.horizontal, 12)
+    }
+
+    private var sidebarList: some View {
+        ScrollViewReader { scroll in
+            List {
+                ForEach(visibleSlides) { row in
+                    slideRow(row).id(row.id).background {
+                        GeometryReader { geometry in
+                            Color.clear.preference(key: SidebarRowPositions.self,
+                                                   value: [row.id: geometry.frame(in: .named("sidebar-viewport")).minY])
+                        }.allowsHitTesting(false)
+                    }
+                }.onMove(perform: canReorderRows ? reorder : nil)
+            }
+            .listStyle(.sidebar)
+            .coordinateSpace(name: "sidebar-viewport")
+            .accessibilityIdentifier("sidebar-list")
+            .onPreferenceChange(SidebarRowPositions.self) { positions in
+                let visible = positions.filter { $0.value >= -8 }.min { $0.value < $1.value }?.key
+                sidebarVisibleChapter = visible
+            }
+            .overlay(alignment: .top) { if draggingPage != nil { scrollEdge(.top, using: scroll) } }
+            .overlay(alignment: .bottom) { if draggingPage != nil { scrollEdge(.bottom, using: scroll) } }
+            .onChange(of: pageToReveal) { _, target in
+                guard let target else { return }
+                if let range = sectionRange(target) {
+                    let header = deck.slides[range.lowerBound].id
+                    if header != target, collapsedSections.remove(header) != nil { return }
+                }
+                scroll.scrollTo(target, anchor: .center)
+                pageToReveal = nil
+            }
+            .onChange(of: collapsedSections) {
+                if let target = pageToReveal {
+                    scroll.scrollTo(target, anchor: .center)
+                    pageToReveal = nil
+                }
+            }
+        }
+    }
+
+    private func positionForRow(_ id: UUID) -> Int { (deck.slides.firstIndex(where: { $0.id == id }) ?? 0) + 1 }
+
+    private func sectionCount(_ id: UUID) -> String {
+        sectionRange(id).map { "\($0.count) 页" } ?? ""
+    }
+
+    @ViewBuilder
+    private func canvasGuides(_ guide: CanvasSnap, scale: CGFloat) -> some View {
+        if let x = guide.x {
+            Rectangle().fill(Color.accentColor).frame(width: 1, height: deck.pageCanvas.height * scale)
+                .position(x: x * scale, y: deck.pageCanvas.height * scale / 2).allowsHitTesting(false)
+            guideLabel(guide.xLabel).position(x: x * scale, y: 15).allowsHitTesting(false)
+        }
+        if let y = guide.y {
+            Rectangle().fill(Color.accentColor).frame(width: deck.pageCanvas.width * scale, height: 1)
+                .position(x: deck.pageCanvas.width * scale / 2, y: y * scale).allowsHitTesting(false)
+            guideLabel(guide.yLabel).position(x: 45, y: y * scale).allowsHitTesting(false)
+        }
+    }
+
+    private func guideLabel(_ title: String?) -> some View {
+        Text(title ?? "对齐").font(.caption2.bold())
+            .padding(.horizontal, 5).padding(.vertical, 3)
+            .background(.regularMaterial, in: .rect(cornerRadius: 4)).fixedSize()
+    }
+
+    private func locateOnCanvas(_ object: SlideObject) {
+        locateTask?.cancel()
+        locatedObject = object.id
+        locateTask = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(900))
+            if !Task.isCancelled { locatedObject = nil }
+        }
+    }
+
+}
+
+private struct SidebarRowPositions: PreferenceKey {
+    static let defaultValue: [UUID: CGFloat] = [:]
+    static func reduce(value: inout [UUID: CGFloat], nextValue: () -> [UUID: CGFloat]) {
+        value.merge(nextValue(), uniquingKeysWith: { _, newer in newer })
+    }
 }
 
 private struct ReferenceFile: Identifiable {

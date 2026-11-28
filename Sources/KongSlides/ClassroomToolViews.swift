@@ -24,6 +24,7 @@ struct ReplaceDeckTextView: View {
     @State private var fields = Set(DeckTextField.allCases)
     @State private var matches: [DeckTextMatch] = []
     @State private var selected = Set<DeckTextMatch.ID>()
+    @State private var previewPage: UUID?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -44,38 +45,82 @@ struct ReplaceDeckTextView: View {
                 Spacer()
                 Button("预览匹配项", action: preview).disabled(query.isEmpty || fields.isEmpty)
             }
-            List(matches, selection: $selected) { entry in
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("第 \(entry.number) 页 · \(entry.id.field.rawValue)").font(.caption).foregroundStyle(.secondary)
-                    Text(entry.snippet).lineLimit(2)
-                }.tag(entry.id)
+            HStack(spacing: 12) {
+                List(matches, selection: $selected) { entry in
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("第 \(entry.number) 页 · \(entry.id.field.rawValue)").font(.caption).foregroundStyle(.secondary)
+                        Text(entry.snippet).lineLimit(2)
+                    }.tag(entry.id)
+                }.frame(width: 250)
+                replacementPreview
             }
             HStack {
                 Text("选中 \(selected.count) 项 / \(matches.count) 项").font(.caption)
                 Button("全选") { selected = Set(matches.map(\.id)) }.disabled(matches.isEmpty)
                 Spacer()
                 Button("关闭") { dismiss() }.keyboardShortcut(.cancelAction)
-                Button("替换所选") { apply(matches.filter { selected.contains($0.id) }, replacement); dismiss() }
+                Button("替换 \(selected.count) 处") { apply(matches.filter { selected.contains($0.id) }, replacement); dismiss() }
                     .disabled(selected.isEmpty)
             }
         }
-        .padding(20).frame(width: 630, height: 450)
+        .padding(18).frame(width: 790, height: 475)
+        .onChange(of: selected) {
+            if let match = matches.first(where: { selected.contains($0.id) && $0.id.page == previewPage }) ?? matches.first(where: { selected.contains($0.id) }) {
+                previewPage = match.id.page
+            }
+        }
         .onChange(of: query) { clear() }
         .onChange(of: fields) { clear() }
         .onChange(of: scope) { clear() }
     }
 
+    @ViewBuilder
+    private var replacementPreview: some View {
+        let selectedMatches = matches.filter { selected.contains($0.id) }
+        let pages = deck.slides.filter { page in selectedMatches.contains { $0.id.page == page.id } }
+        if let page = pages.first(where: { $0.id == previewPage }) ?? pages.first {
+            let matchesOnPage = selectedMatches.filter { $0.id.page == page.id }
+            let updated = changedPage(page, matches: matchesOnPage)
+            VStack(alignment: .leading, spacing: 7) {
+                Picker("预览页面", selection: $previewPage) {
+                    ForEach(pages) { item in Text(item.title).tag(Optional(item.id)) }
+                }
+                SlideChangePreview(before: page, after: updated, original: deck, revised: deck)
+                if page.speakerNotes != updated.speakerNotes {
+                    Text("讲稿 · \(shortNotes(page.speakerNotes)) → \(shortNotes(updated.speakerNotes))")
+                        .font(.caption).lineLimit(2)
+                }
+                if page.section != updated.section {
+                    Text("章名 · \(page.section) → \(updated.section)").font(.caption).lineLimit(1)
+                }
+            }
+        } else {
+            ContentUnavailableView("选择匹配项预览", systemImage: "rectangle.split.2x1")
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+
+    private func changedPage(_ page: Slide, matches: [DeckTextMatch]) -> Slide {
+        var copy = deck.selectingPages([page.id])
+        copy.replace(matches, with: replacement)
+        return copy.slides.first ?? page
+    }
+
+    private func shortNotes(_ notes: String) -> String { String(notes.prefix(65)) }
+
     private func preview() {
         let pages: Set<UUID> = scope == .page ? [current] : scope == .section ? chapter : Set(deck.slides.map(\.id))
         matches = deck.matchingText(query, fields: fields, pages: pages)
         selected = Set(matches.map(\.id))
+        previewPage = matches.first?.id.page
     }
 
-    private func clear() { matches = []; selected = [] }
+    private func clear() { matches = []; selected = []; previewPage = nil }
 }
 
 struct BatchSlideStyleView: View {
-    let pages: [String]
+    let deck: Deck
+    let pages: [UUID]
     let apply: (Double?, String?, String?, Bool?) -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var updateTitle = false
@@ -86,11 +131,23 @@ struct BatchSlideStyleView: View {
     @State private var titleSize = 40.0
     @State private var textColor = Palette.ink
     @State private var background = Palette.paper
+    @State private var previewID: UUID?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("批量调整 \(pages.count) 页").font(.title2.bold())
-            List(pages.indices, id: \.self) { index in Text(pages[index]) }.frame(height: 110)
+            HStack(spacing: 12) {
+                List(pages, id: \.self, selection: $previewID) { id in
+                    if let page = deck.slides.first(where: { $0.id == id }),
+                       let index = deck.slides.firstIndex(where: { $0.id == id }) {
+                        Text("第 \(index + 1) 页 · \(page.title)").tag(id)
+                    }
+                }.frame(width: 190)
+                if let original = deck.slides.first(where: { $0.id == (previewID ?? pages.first) }) {
+                    let revised = preview(of: original.id)
+                    SlideChangePreview(before: original, after: revised.slides.first, original: deck, revised: revised)
+                }
+            }.frame(minHeight: 188)
             HStack {
                 Toggle("标题字号", isOn: $updateTitle)
                 TextField("字号", value: $titleSize, format: .number).frame(width: 65).disabled(!updateTitle)
@@ -111,13 +168,23 @@ struct BatchSlideStyleView: View {
             HStack {
                 Spacer()
                 Button("取消") { dismiss() }.keyboardShortcut(.cancelAction)
-                Button("应用") {
+                Button("修改 \(pages.count) 页") {
                     apply(updateTitle ? min(200, max(8, titleSize)) : nil, updateText ? textColor : nil,
                           updateBackground ? background : nil, updateFooter ? showFooter : nil)
                     dismiss()
                 }.disabled(!updateTitle && !updateText && !updateBackground && !updateFooter)
             }
-        }.padding(20).frame(width: 530)
+        }.padding(20).frame(width: 755, height: 390)
+         .onAppear { previewID = pages.first }
+    }
+
+    private func preview(of id: UUID) -> Deck {
+        var revised = deck.selectingPages([id])
+        revised.applyBatchStyle(to: [id], titleSize: updateTitle ? min(200, max(8, titleSize)) : nil,
+                                bodyColor: updateText ? textColor : nil, background: updateBackground ? background : nil,
+                                showFooter: updateFooter ? showFooter : nil)
+        if updateFooter && !showFooter { revised.slides[0].objects.removeAll { $0.isCourseFooter == true } }
+        return revised
     }
 
     private func colors(_ value: Binding<String>) -> some View {
@@ -325,7 +392,7 @@ struct ClassroomDropHandler: DropDelegate {
 
 struct ClassroomRowDrag: ViewModifier {
     let enabled: Bool
-    let highlighted: Bool
+    let destinationLabel: String?
     let provider: () -> NSItemProvider
     let entered: (Bool) -> Void
     let dropped: () -> Bool
@@ -334,10 +401,45 @@ struct ClassroomRowDrag: ViewModifier {
         if enabled {
             content
                 .overlay(alignment: .top) {
-                    if highlighted { Rectangle().fill(Color.accentColor).frame(height: 2).allowsHitTesting(false) }
+                    if let destinationLabel {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Rectangle().fill(Color.accentColor).frame(height: 2)
+                            Text(destinationLabel).font(.caption2).foregroundStyle(Color.accentColor)
+                                .padding(3).background(.regularMaterial, in: .rect(cornerRadius: 3))
+                        }.frame(maxWidth: .infinity, alignment: .leading).allowsHitTesting(false)
+                    }
                 }
                 .onDrag(provider)
                 .onDrop(of: [classroomSlideDragType], delegate: ClassroomDropHandler(entered: entered, dropped: dropped))
         } else { content }
+    }
+}
+
+
+struct SlideChangePreview: View {
+    let before: Slide?
+    let after: Slide?
+    let original: Deck
+    let revised: Deck
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            card("更改前", page: before, deck: original)
+            card("更改后", page: after, deck: revised)
+        }.frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func card(_ title: String, page: Slide?, deck: Deck) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(title).font(.caption.bold()).foregroundStyle(.secondary)
+            if let page {
+                SlideSurface(slide: page, images: deck.images, canvas: deck.pageCanvas)
+                    .clipShape(.rect(cornerRadius: 4))
+                    .overlay(RoundedRectangle(cornerRadius: 4).strokeBorder(.secondary.opacity(0.28)))
+            } else {
+                Text("此版本没有该页面").foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }.frame(maxWidth: .infinity)
     }
 }

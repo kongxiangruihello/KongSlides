@@ -379,40 +379,56 @@ private struct PresenterView: View {
                             .monospacedDigit()
                     }
                 }
+                TextField("页码", text: $jump).frame(width: 56).onSubmit(go)
+                Button("跳页", action: go)
+                Button("搜索跳页…") { showSearch = true }
+                    .popover(isPresented: $showSearch) { PresenterSearchView(session: session) }
                 ProjectionTools(session: session)
                 Button("交换屏幕", action: session.swapScreens)
                 Button("结束放映", action: session.stop)
             }
-            HStack(alignment: .top, spacing: 16) {
-                VStack(alignment: .leading) {
-                    Text("当前页").font(.headline)
-                    SlideSurface(slide: slide, images: session.deck.images, canvas: session.deck.pageCanvas)
-                        .overlay { PresentationInk(session: session, interactive: true) }
-                    HStack {
-                        Button("上一页") { session.step(-1) }.disabled(session.sequentialIndex(-1) == nil)
-                        Button("下一页") { session.step(1) }.disabled(session.sequentialIndex(1) == nil)
-                        Spacer()
-                        TextField("页码", text: $jump).frame(width: 65).onSubmit(go)
-                        Button("跳页", action: go)
-                        Button("搜索跳页…") { showSearch = true }
-                            .popover(isPresented: $showSearch) { PresenterSearchView(session: session) }
-                        BackupPageMenu(session: session)
-                    }
-                }
-                VStack(alignment: .leading) {
-                    Text("下一页").font(.headline)
-                    if let next = session.sequentialIndex(1) {
-                        SlideSurface(slide: session.deck.slides[next], images: session.deck.images, canvas: session.deck.pageCanvas)
-                    } else {
-                        Text("已到最后一页").foregroundStyle(.secondary)
-                    }
-                }
-                .frame(maxWidth: 280)
-            }
             Divider()
+            GeometryReader { geometry in
+                HStack(alignment: .top, spacing: 16) {
+                    previewColumn.frame(width: min(340, max(190, geometry.size.width * 0.34)))
+                    Divider()
+                    speakerColumn.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                }
+            }
+        }
+        .padding(20)
+        .frame(minWidth: 710, minHeight: 490)
+    }
+
+    private var previewColumn: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("当前投影 · 第 \(session.index + 1) 页").font(.headline)
+            SlideSurface(slide: slide, images: session.deck.images, canvas: session.deck.pageCanvas)
+                .overlay { PresentationInk(session: session, interactive: true) }
+                .frame(maxHeight: 170)
+            HStack {
+                Button("上一页") { session.step(-1) }.disabled(session.sequentialIndex(-1) == nil)
+                Button("下一页") { session.step(1) }.disabled(session.sequentialIndex(1) == nil)
+                Spacer(minLength: 5)
+                BackupPageMenu(session: session)
+            }
+            Text("下一页").font(.headline)
+            if let next = session.sequentialIndex(1) {
+                SlideSurface(slide: session.deck.slides[next], images: session.deck.images, canvas: session.deck.pageCanvas)
+                    .frame(maxHeight: 150)
+            } else {
+                Text("已到最后一页").foregroundStyle(.secondary)
+            }
+        }
+        .frame(maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private var speakerColumn: some View {
+        VStack(alignment: .leading, spacing: 10) {
             HStack {
                 Text("逐字讲稿").font(.headline)
                 Spacer()
+                if !session.notes.isEmpty { Text("\(session.noteIndex + 1)/\(session.notes.count) 段").foregroundStyle(.secondary) }
                 Button("上一段 [") { session.stepNote(-1) }.disabled(session.noteIndex == 0)
                 Button("下一段 ]") { session.stepNote(1) }.disabled(session.noteIndex + 1 >= session.notes.count)
             }
@@ -423,20 +439,22 @@ private struct PresenterView: View {
                     }
                     if session.notes.isEmpty { Text("本页暂无讲稿").foregroundStyle(.secondary) }
                     ForEach(session.notes.indices, id: \.self) { index in
-                        Text(session.notes[index]).font(.system(size: 21))
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(5)
-                            .background(index == session.noteIndex ? Color.accentColor.opacity(0.18) : .clear,
-                                        in: .rect(cornerRadius: 5))
-                            .id(index)
+                        let current = index == session.noteIndex
+                        HStack(alignment: .top, spacing: 9) {
+                            Rectangle().fill(current ? Color.accentColor : Color.clear).frame(width: 4)
+                            Text(session.notes[index]).font(.system(size: 21, weight: current ? .semibold : .regular))
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.vertical, 8)
+                        }
+                        .padding(.horizontal, 6)
+                        .background(current ? Color.accentColor.opacity(0.17) : .clear, in: .rect(cornerRadius: 5))
+                        .id(index)
                     }
                 }
                 .onChange(of: session.noteIndex) { scroll.scrollTo(session.noteIndex, anchor: .center) }
                 .id(slide.id)
             }
         }
-        .padding(20)
-        .frame(minWidth: 640, minHeight: 460)
     }
 
     private func go() {
@@ -536,6 +554,9 @@ private struct PresenterSearchView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
+            Label("仅教师可见", systemImage: "lock").font(.headline)
+            Text("当前投影第 \(session.index + 1) 页")
+                .font(.caption).foregroundStyle(.secondary)
             TextField("章节名称、标题或关键词", text: $query)
             HStack {
                 List(filtered, id: \.self, selection: $active) { index in
@@ -543,12 +564,18 @@ private struct PresenterSearchView: View {
                     Text("\(index + 1)  \(page.section)  \(page.title)").tag(index)
                 }
                 if let active {
-                    SlideSurface(slide: session.deck.slides[active], images: session.deck.images, canvas: session.deck.pageCanvas)
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("待切换第 \(active + 1) 页").font(.headline)
+                        SlideSurface(slide: session.deck.slides[active], images: session.deck.images, canvas: session.deck.pageCanvas)
+                    }
                 }
             }
-            Button("将预览页切到投影") {
-                if let active { session.go(to: active); dismiss() }
-            }.disabled(active == nil)
+            HStack {
+                Spacer()
+                Button(active.map { "切到第 \($0 + 1) 页" } ?? "选中一页后切换") {
+                    if let active { session.go(to: active); dismiss() }
+                }.buttonStyle(.borderedProminent).disabled(active == nil)
+            }
         }.padding(15).frame(width: 590, height: 330)
          .onChange(of: query) { active = nil }
     }

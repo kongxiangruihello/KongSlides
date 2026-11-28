@@ -34,6 +34,7 @@ struct CanvasTextEditor: NSViewRepresentable {
     let edit: (String) -> Void
     let select: ([Range<Int>]) -> Void
     let finish: () -> Void
+    var cancel: (() -> Void)? = nil
 
     final class Coordinator: NSObject, NSTextViewDelegate {
         var editor: CanvasTextEditor
@@ -61,7 +62,7 @@ struct CanvasTextEditor: NSViewRepresentable {
 
         func textView(_ textView: NSTextView, doCommandBy selector: Selector) -> Bool {
             guard selector == #selector(NSResponder.cancelOperation(_:)) else { return false }
-            editor.finish()
+            (editor.cancel ?? editor.finish)()
             return true
         }
     }
